@@ -41,6 +41,13 @@ CLIENTS=${CLIENTS:-"Keenetic belka mama dzh"}
 # именно на этом 2026-09-07 лёг голландский: первой оказалась «чёрная дыра».
 DEFAULT_EXIT=${DEFAULT_EXIT:-direct}
 
+# Отвечать ли на пинг. По умолчанию ОТВЕЧАЕТ (0) — так удобнее диагностировать:
+# сразу видно, сервер лежит или адрес заблокирован. Скрытности отключение почти
+# не добавляет: серьёзные сканеры пинг не спрашивают, они стучатся по портам,
+# а порты всё равно открыты. Выбор сервера в mihomo от этого НЕ зависит —
+# группа «по пингу» на самом деле меряет HTTP-запрос, а не ICMP.
+DISABLE_PING=${DISABLE_PING:-0}
+
 ###############################################################################
 # 0. Защита от запуска на живом сервере
 ###############################################################################
@@ -82,14 +89,14 @@ apt-get update -qq
 apt-get -y -qq install curl tar socat sqlite3 ufw >/dev/null 2>&1
 ok "зависимости на месте"
 
-step "Отключаем IPv6 и ответы на пинг"
+step "Настройки ядра"
 sed -i '/disable_ipv6/d;/icmp_echo_ignore_all/d' /etc/sysctl.conf
 cat >> /etc/sysctl.conf <<'SYSCTL'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
-net.ipv4.icmp_echo_ignore_all = 1
 SYSCTL
+[[ "$DISABLE_PING" == "1" ]] && echo "net.ipv4.icmp_echo_ignore_all = 1" >> /etc/sysctl.conf
 sysctl -p >/dev/null 2>&1
 # Настройки применяются ещё раз ПОСЛЕ файрвола — см. раздел ниже, ufw их перебивает.
 ok "записано в /etc/sysctl.conf (применим окончательно после файрвола)"
@@ -109,17 +116,23 @@ ok "открыты: 22 (SSH), 80 (выпуск сертификата), ${PANEL_
 # /etc/default/ufw как IPT_SYSCTL) и применяет его при каждом включении,
 # перебивая /etc/sysctl.conf. Там строкой net/ipv4/icmp_echo_ignore_all=0
 # ответы на пинг включаются обратно. Поэтому правим именно его.
-if grep -q "^net/ipv4/icmp_echo_ignore_all=" /etc/ufw/sysctl.conf 2>/dev/null; then
-	sed -i 's|^net/ipv4/icmp_echo_ignore_all=.*|net/ipv4/icmp_echo_ignore_all=1|' /etc/ufw/sysctl.conf
-else
-	echo "net/ipv4/icmp_echo_ignore_all=1" >> /etc/ufw/sysctl.conf
+if [[ "$DISABLE_PING" == "1" ]]; then
+	if grep -q "^net/ipv4/icmp_echo_ignore_all=" /etc/ufw/sysctl.conf 2>/dev/null; then
+		sed -i 's|^net/ipv4/icmp_echo_ignore_all=.*|net/ipv4/icmp_echo_ignore_all=1|' /etc/ufw/sysctl.conf
+	else
+		echo "net/ipv4/icmp_echo_ignore_all=1" >> /etc/ufw/sysctl.conf
+	fi
 fi
 ufw reload >/dev/null 2>&1
 sysctl -p >/dev/null 2>&1
 # Отчитываемся тем, что РЕАЛЬНО в ядре, а не тем, что записали в файл.
 PING_OFF=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)
 IPV6_OFF=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
-[[ "$PING_OFF" == "1" ]] && ok "сервер не отвечает на пинг" || bad "пинг всё ещё включён (в ядре $PING_OFF)"
+if [[ "$DISABLE_PING" == "1" ]]; then
+	[[ "$PING_OFF" == "1" ]] && ok "сервер не отвечает на пинг" 	                         || bad "пинг просили отключить, но в ядре $PING_OFF"
+else
+	[[ "$PING_OFF" == "0" ]] 		&& ok "сервер отвечает на пинг (так удобнее диагностировать; отключить: DISABLE_PING=1)" 		|| bad "пинг отключён, хотя не просили (в ядре $PING_OFF) — смотри /etc/ufw/sysctl.conf"
+fi
 [[ "$IPV6_OFF" == "1" ]] && ok "IPv6 выключен" || bad "IPv6 всё ещё включён (в ядре $IPV6_OFF)"
 
 ###############################################################################

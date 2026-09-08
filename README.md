@@ -21,6 +21,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 | Переменная | По умолчанию | Что делает |
 |---|---|---|
 | `DEFAULT_EXIT` | `direct` | выход по умолчанию: `direct` или `warp` |
+| `DISABLE_PING` | `0` | `1` — не отвечать на пинг. По умолчанию отвечает: так проще диагностировать, а скрытности почти не добавляет. На выбор сервера в mihomo не влияет |
 | `DO_WARP` | `1` | ставить ли Cloudflare WARP |
 | `DO_UPGRADE` | `1` | обновлять ли систему перед установкой |
 | `CREATE_INBOUNDS` | `1` | создавать ли подключения автоматически |
