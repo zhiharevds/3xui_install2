@@ -357,7 +357,15 @@ for p in "${PANEL_PORT}" "${SUB_PORT}" "${PORT_REALITY}" "${PORT_XHTTP}"; do
 done
 printf "  панель отвечает: %s (%s)
 " "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "${PANEL_SCHEME}://${MAIN_IP}:${PANEL_PORT}${PANEL_PATH}")" "${PANEL_SCHEME}"
-grep -q "restart x-ui" /root/.acme.sh/*/*.conf 2>/dev/null \
+# acme.sh хранит команду перезапуска в base64 — простым grep её не найти.
+HOOK=""
+for f in /root/.acme.sh/*/*.conf; do
+	[[ -f "$f" ]] || continue
+	raw=$(grep -h "Le_ReloadCmd" "$f" 2>/dev/null)
+	enc=$(sed "s/.*__ACME_BASE64__START_//; s/__ACME_BASE64__END_.*//" <<< "$raw")
+	HOOK="${HOOK}${raw}$(base64 -d <<< "$enc" 2>/dev/null)"
+done
+grep -q "restart x-ui" <<< "$HOOK" \
 	&& ok "автопродление перезапускает панель" \
 	|| bad "в хуке продления нет перезапуска панели — подписки протухнут (x-ui → 20 → 5)"
 
