@@ -62,6 +62,12 @@ MAIN_IP=$(curl -s --max-time 10 https://api4.ipify.org || curl -s --max-time 10 
 PANEL_PORT=$(shuf -i 50000-65535 -n1)
 PANEL_PATH="/$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 18)/"
 PANEL_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 18)
+# Почта для учётки Let's Encrypt. ВАЖНО: домен обязан оканчиваться настоящей зоной.
+# Адрес вида admin@1-2-3-4.invalid LE отвергает («invalid public suffix»), и тогда
+# не выпускается сертификат, панель остаётся на обычном HTTP, а подписки протухают.
+ACME_MAIL="$(head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 10)@$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 10).com"
+CERT=/root/cert/ip/fullchain.pem
+KEY=/root/cert/ip/privkey.pem
 ok "IP=${MAIN_IP}  порт панели=${PANEL_PORT}  выход по умолчанию=${DEFAULT_EXIT}"
 
 ###############################################################################
@@ -111,10 +117,15 @@ export XUI_WEB_BASE_PATH="${PANEL_PATH}"
 export XUI_DB_TYPE=sqlite
 export XUI_SSL_MODE=ip                 # сертификат Let's Encrypt на голый IP
 export XUI_ACME_HTTP_PORT=80
-export XUI_ACME_EMAIL="admin@${MAIN_IP//./-}.invalid"
+export XUI_ACME_EMAIL="${ACME_MAIL}"
 export XUI_SERVER_IP="${MAIN_IP}"
 export XUI_ENABLE_FAIL2BAN=true
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) </dev/null 2>&1 | tail -20
+# Полный вывод установщика — в отдельный файл: если что-то пойдёт не так,
+# без него причину не найти (проверено на себе).
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) </dev/null \
+	> /root/xui-install-raw.log 2>&1
+tail -5 /root/xui-install-raw.log
+echo "  (полный вывод установщика: /root/xui-install-raw.log)"
 
 command -v x-ui >/dev/null || { bad "установка панели не удалась"; exit 1; }
 sleep 3
@@ -124,16 +135,34 @@ PANEL_PORT=$(/usr/local/x-ui/x-ui setting -show true 2>/dev/null | grep -Eo 'por
 PANEL_PATH=$(/usr/local/x-ui/x-ui setting -show true 2>/dev/null | grep -Eo 'webBasePath: .+' | awk '{print $2}')
 ok "панель установлена: порт ${PANEL_PORT}, путь ${PANEL_PATH}"
 
-step "Проверяем, что сертификат выписан и прописан панели"
-CERT=/root/cert/ip/fullchain.pem
-KEY=/root/cert/ip/privkey.pem
+step "Сертификат Let's Encrypt на IP"
+if [[ ! -f "$CERT" || ! -f "$KEY" ]]; then
+	# Установщик мог не справиться — выпускаем сами, тем же официальным рецептом.
+	echo "  установщик сертификат не выпустил, делаем сами"
+	[[ -x /root/.acme.sh/acme.sh ]] || curl -s https://get.acme.sh | sh -s email="${ACME_MAIL}" >/dev/null 2>&1
+	/root/.acme.sh/acme.sh --register-account -m "${ACME_MAIL}" --server letsencrypt >/dev/null 2>&1
+	/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force >/dev/null 2>&1
+	/root/.acme.sh/acme.sh --issue -d "${MAIN_IP}" --standalone --server letsencrypt \
+		--certificate-profile shortlived --days 6 --httpport 80 --force 2>&1 | tail -3
+	mkdir -p /root/cert/ip
+	# --reloadcmd обязателен: без перезапуска панель держит старый сертификат
+	# в памяти и подписки перестают качаться.
+	/root/.acme.sh/acme.sh --installcert --force -d "${MAIN_IP}" \
+		--key-file "$KEY" --fullchain-file "$CERT" \
+		--reloadcmd "systemctl restart x-ui" 2>&1 | tail -2 || true
+	/root/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1
+	chmod 600 "$KEY" 2>/dev/null; chmod 644 "$CERT" 2>/dev/null
+fi
+
 if [[ -f "$CERT" && -f "$KEY" ]]; then
-	ok "сертификат: $(openssl x509 -in $CERT -noout -enddate | cut -d= -f2)"
+	ok "сертификат действует до: $(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)"
 	/usr/local/x-ui/x-ui cert -webCert "$CERT" -webCertKey "$KEY" >/dev/null 2>&1
 	ok "прописан панели"
+	PANEL_SCHEME=https
 else
-	bad "сертификата нет — панель останется на обычном HTTP"
-	bad "выпустить вручную: x-ui → пункт 20 → 6"
+	bad "сертификат так и не выпустился — панель останется на обычном HTTP"
+	bad "смотри /root/xui-install-raw.log, потом: x-ui → пункт 20 → 6"
+	PANEL_SCHEME=http
 fi
 
 # Файрвол мог быть открыт установщиком на другой порт панели
@@ -211,12 +240,15 @@ if [[ "$DO_WARP" == "1" ]]; then
 	warp-cli --accept-tos registration new >/dev/null 2>&1
 	warp-cli --accept-tos mode proxy      >/dev/null 2>&1
 	warp-cli --accept-tos connect         >/dev/null 2>&1
-	sleep 3
-	if warp-cli --accept-tos status 2>/dev/null | grep -qi connected; then
-		ok "WARP подключён (SOCKS на 127.0.0.1:40000)"
-	else
-		bad "WARP не поднялся — проверить: warp-cli status"
-	fi
+	# Подключение занимает больше пары секунд: ждём до 40, иначе получаем
+	# ложное «не поднялся» на самом деле рабочем WARP.
+	WARP_OK=0
+	for _ in $(seq 1 20); do
+		if warp-cli --accept-tos status 2>/dev/null | grep -qi connected; then WARP_OK=1; break; fi
+		sleep 2
+	done
+	[[ "$WARP_OK" == "1" ]] && ok "WARP подключён (SOCKS на 127.0.0.1:40000)" \
+	                        || bad "WARP не поднялся — проверить: warp-cli status"
 fi
 
 x-ui restart >/dev/null 2>&1
@@ -323,7 +355,8 @@ journalctl -u x-ui --no-pager 2>/dev/null | grep "Web server running" | tail -1 
 for p in "${PANEL_PORT}" "${SUB_PORT}" "${PORT_REALITY}" "${PORT_XHTTP}"; do
 	ss -tln | grep -q ":${p} " && ok "порт ${p} слушает" || bad "порт ${p} НЕ слушает"
 done
-printf "  панель отвечает: %s\n" "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "https://${MAIN_IP}:${PANEL_PORT}${PANEL_PATH}")"
+printf "  панель отвечает: %s (%s)
+" "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "${PANEL_SCHEME}://${MAIN_IP}:${PANEL_PORT}${PANEL_PATH}")" "${PANEL_SCHEME}"
 grep -q "restart x-ui" /root/.acme.sh/*/*.conf 2>/dev/null \
 	&& ok "автопродление перезапускает панель" \
 	|| bad "в хуке продления нет перезапуска панели — подписки протухнут (x-ui → 20 → 5)"
@@ -337,7 +370,7 @@ cat <<SUMMARY | tee -a /root/3xui-credentials.txt
 ###############################################################################
  УСТАНОВКА ЗАВЕРШЕНА  ($(date '+%Y-%m-%d %H:%M'))
 ###############################################################################
- Панель:    https://${MAIN_IP}:${PANEL_PORT}${PANEL_PATH}
+ Панель:    ${PANEL_SCHEME}://${MAIN_IP}:${PANEL_PORT}${PANEL_PATH}
  Логин:     admin
  Пароль:    ${PANEL_PASS}
 
