@@ -12,8 +12,7 @@
 #   отключение IPv6 и пинга, файрвол, шаблон маршрутизации, подписка по TLS,
 #   WARP, подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0.
 #
-# Запуск:
-#   systemctl stop unattended-upgrades
+# Запуск (одна команда; unattended-upgrades скрипт останавливает сам, шаг 1):
 #   bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/3xui_install3.sh)
 ###############################################################################
 

@@ -8,9 +8,10 @@
 сертификат Let's Encrypt на голый IP и его продление делают штатные средства 3x-ui.
 
 ```bash
-systemctl stop unattended-upgrades
 bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/3xui_install3.sh)
 ```
+
+Останавливать `unattended-upgrades` отдельно не нужно — скрипт делает это сам первым шагом.
 
 Скрипт отказывается работать, если на сервере уже установлен x-ui: он сбрасывает
 файрвол и пароль панели, поэтому запускать его можно только на чистой системе.
