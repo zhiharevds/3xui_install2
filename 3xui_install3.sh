@@ -92,7 +92,8 @@ net.ipv6.conf.lo.disable_ipv6 = 1
 net.ipv4.icmp_echo_ignore_all = 1
 SYSCTL
 sysctl -p >/dev/null 2>&1
-ok "IPv6 выключен, сервер не отвечает на пинг"
+# Настройки применяются ещё раз ПОСЛЕ файрвола — см. раздел ниже, ufw их перебивает.
+ok "записано в /etc/sysctl.conf (применим окончательно после файрвола)"
 
 ###############################################################################
 # 2. Файрвол — ДО установки, чтобы порт 80 был открыт для выпуска сертификата
@@ -104,6 +105,23 @@ for p in 22/tcp 80/tcp ${PANEL_PORT}/tcp ${SUB_PORT}/tcp ${PORT_REALITY}/tcp ${P
 done
 ufw --force enable >/dev/null 2>&1
 ok "открыты: 22 (SSH), 80 (выпуск сертификата), ${PANEL_PORT} (панель), ${SUB_PORT} (подписки), ${PORT_REALITY}, ${PORT_XHTTP}"
+
+# 🔴 ufw держит СВОЙ файл настроек ядра (/etc/ufw/sysctl.conf, прописан в
+# /etc/default/ufw как IPT_SYSCTL) и применяет его при каждом включении,
+# перебивая /etc/sysctl.conf. Там строкой net/ipv4/icmp_echo_ignore_all=0
+# ответы на пинг включаются обратно. Поэтому правим именно его.
+if grep -q "^net/ipv4/icmp_echo_ignore_all=" /etc/ufw/sysctl.conf 2>/dev/null; then
+	sed -i 's|^net/ipv4/icmp_echo_ignore_all=.*|net/ipv4/icmp_echo_ignore_all=1|' /etc/ufw/sysctl.conf
+else
+	echo "net/ipv4/icmp_echo_ignore_all=1" >> /etc/ufw/sysctl.conf
+fi
+ufw reload >/dev/null 2>&1
+sysctl -p >/dev/null 2>&1
+# Отчитываемся тем, что РЕАЛЬНО в ядре, а не тем, что записали в файл.
+PING_OFF=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)
+IPV6_OFF=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+[[ "$PING_OFF" == "1" ]] && ok "сервер не отвечает на пинг" || bad "пинг всё ещё включён (в ядре $PING_OFF)"
+[[ "$IPV6_OFF" == "1" ]] && ok "IPv6 выключен" || bad "IPv6 всё ещё включён (в ядре $IPV6_OFF)"
 
 ###############################################################################
 # 3. Официальный установщик 3x-ui — он же выпускает сертификат на IP
