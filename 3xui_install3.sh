@@ -37,6 +37,9 @@ DO_UPGRADE=${DO_UPGRADE:-1}           # 1 = обновить систему пе
 DO_WARP=${DO_WARP:-1}                 # 1 = поставить Cloudflare WARP
 CREATE_INBOUNDS=${CREATE_INBOUNDS:-1} # 1 = создать подключения автоматически
 CLIENTS=${CLIENTS:-"Keenetic belka mama dzh"}
+# Имя сервера: так будут называться его узлы в панели шлюза и сам сервер в панели мониторинга.
+# Пусто = придумать самому: страна + конец адреса, например GB-113. Своё: SERVER_NAME=HIP-NL
+SERVER_NAME=${SERVER_NAME:-}
 
 # Выход по умолчанию для трафика, не попавшего ни под одно правило.
 #   direct — напрямую с IP сервера (быстро; так на боевых серверах после Р-15)
@@ -86,7 +89,12 @@ PANEL_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 18)
 ACME_MAIL="$(head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 10)@$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 10).com"
 CERT=/root/cert/ip/fullchain.pem
 KEY=/root/cert/ip/privkey.pem
-ok "IP=${MAIN_IP}  порт панели=${PANEL_PORT}  выход по умолчанию=${DEFAULT_EXIT}"
+if [[ -z "$SERVER_NAME" ]]; then
+	CC=$(curl -s --max-time 8 https://ipinfo.io/country | tr -dc 'A-Za-z' | tr 'a-z' 'A-Z' | head -c 2)
+	SERVER_NAME="${CC:-VPS}-${MAIN_IP##*.}"
+fi
+SERVER_NAME=$(tr -c 'A-Za-z0-9-' '-' <<< "$SERVER_NAME" | sed 's/-*$//')
+ok "IP=${MAIN_IP}  имя=${SERVER_NAME}  порт панели=${PANEL_PORT}  выход по умолчанию=${DEFAULT_EXIT}"
 
 ###############################################################################
 # 1. Система
@@ -309,7 +317,7 @@ sleep 5
 ###############################################################################
 if [[ "$CREATE_INBOUNDS" == "1" ]]; then
 	step "Создание подключений"
-	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP PORT_HY2 DO_HY2 CERT KEY
+	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP PORT_HY2 DO_HY2 CERT KEY SERVER_NAME
 	python3 <<'PYEOF'
 import json, os, re, secrets, ssl, subprocess, time, urllib.request, urllib.parse, http.cookiejar
 PORT, PATH = os.environ["PANEL_PORT"], os.environ["PANEL_PATH"].rstrip("/")
@@ -348,6 +356,7 @@ def uuid():
     return subprocess.run([XRAY, "uuid"], capture_output=True, text=True).stdout.strip()
 
 names = os.environ["CLIENTS"].split()
+SRV = os.environ["SERVER_NAME"]          # имя сервера — в названия подключений, чтобы узлы были узнаваемы
 people = {n: {"id": uuid(), "sub": secrets.token_hex(8)} for n in names}
 def client(n, flow):
     return {"id": people[n]["id"], "email": n, "flow": flow,
@@ -364,7 +373,7 @@ def add(remark, port, settings, stream, protocol="vless", sniffing=sniff):
 
 # --- REALITY на 443 (tcp + vision) ---
 pv, pb = keypair(); sid = secrets.token_hex(8)
-add("reality-443", os.environ["PORT_REALITY"],
+add(SRV + "-REALITY", os.environ["PORT_REALITY"],
     json.dumps({"clients": [client(n, "xtls-rprx-vision") for n in names], "decryption": "none"}),
     json.dumps({"network": "tcp", "security": "reality", "realitySettings": {
         "show": False, "dest": "max.ru:443", "xver": 0, "serverNames": ["max.ru"],
@@ -374,7 +383,7 @@ add("reality-443", os.environ["PORT_REALITY"],
 
 # --- XHTTP на 8080 (его ТСПУ не душит, в отличие от голого TCP) ---
 pv2, pb2 = keypair(); sid2 = secrets.token_hex(8)
-add("reality-8080-xhttp", os.environ["PORT_XHTTP"],
+add(SRV + "-XHTTP", os.environ["PORT_XHTTP"],
     json.dumps({"clients": [client(n, "") for n in names], "decryption": "none"}),
     json.dumps({"network": "xhttp",
         "xhttpSettings": {"path": "/helix/polls", "host": "", "mode": "auto",
@@ -406,7 +415,7 @@ if os.environ.get("DO_HY2") == "1":
                        "tgId": 0, "totalGB": 0, "created_at": ms, "updated_at": ms} for n in names]
         if "Keenetic" not in names:
             hy_sub = None
-        add("hysteria2-%s" % os.environ["PORT_HY2"], os.environ["PORT_HY2"],
+        add(SRV + "-HY2", os.environ["PORT_HY2"],
             json.dumps({"clients": hy_clients, "version": 2}),
             json.dumps({"network": "hysteria", "security": "tls",
                 "tlsSettings": {"serverName": "", "minVersion": "1.2", "maxVersion": "1.3",
@@ -424,8 +433,8 @@ if os.environ.get("DO_HY2") == "1":
         print("  hysteria2: ПРОПУЩЕНО — нет сертификата (Hysteria без него не работает)")
 
 with open("/root/3xui-credentials.txt", "a") as f:
-    f.write(f"\nreality-443       sni=max.ru        pbk={pb}  sid={sid}\n")
-    f.write(f"reality-8080-xhttp sni=api.twitch.tv path=/helix/polls pbk={pb2} sid={sid2}\n")
+    f.write(f"\n{SRV}-REALITY  sni=max.ru        pbk={pb}  sid={sid}\n")
+    f.write(f"{SRV}-XHTTP sni=api.twitch.tv path=/helix/polls pbk={pb2} sid={sid2}\n")
     for n in names:
         f.write(f"  {n:<10} uuid={people[n]['id']}  subId={people[n]['sub']}\n")
     if hy_sub:
@@ -501,23 +510,12 @@ grep -q "restart x-ui" <<< "$HOOK" \
 ###############################################################################
 SUB1=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic' LIMIT 1" 2>/dev/null)
 SUBHY=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy' LIMIT 1" 2>/dev/null)
-# Готовый блок для конфига домашнего шлюза: собираем заранее, в итог подставляем переменной.
-gw_block() {   # $1 = имя-заглушка, $2 = id подписки
-	printf '  %s:
-    type: http
-    url: "https://%s:%s/clash/%s"
-    path: ./providers/%s.yaml
-    interval: 86400
-    override: { udp: true }
-    health-check: { enable: true, url: https://www.gstatic.com/generate_204, interval: 300 }
-' 		"$1" "$MAIN_IP" "$SUB_PORT" "$2" "$1"
-}
-GW_BLOCK=$(gw_block "ИМЯ" "$SUB1")
-[[ -n "$SUBHY" ]] && GW_BLOCK="${GW_BLOCK}"$'
-
-'"$(gw_block "ИМЯ-hy2" "$SUBHY")"
+# Одна команда для домашнего шлюза: она сама допишет подписки в конфиг, проверит, сохранит в git
+# и перечитает (команда add-vps лежит на шлюзе; исходник — add-vps.py в этом репозитории).
+GW_CMD="sudo add-vps ${SERVER_NAME} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUB1}\""
+[[ -n "$SUBHY" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBHY}\""
 MON_NOTE=""
-[[ "$MON_OK" == "1" ]] && MON_NOTE=" Панель мониторинга VPS увидит сервер сама, как только подписка появится в шлюзе."
+[[ "$MON_OK" == "1" ]] && MON_NOTE=" В панели мониторинга VPS сервер появится сам при следующем замере."
 cat <<SUMMARY | tee -a /root/3xui-credentials.txt
 
 ###############################################################################
@@ -530,12 +528,12 @@ cat <<SUMMARY | tee -a /root/3xui-credentials.txt
  Подписка для телефонов и программ (у каждого клиента своя, см. выше):
             https://${MAIN_IP}:${SUB_PORT}/sub/${SUB1}
 
- ДЛЯ ДОМАШНЕГО ШЛЮЗА (mihomo): вставить в /etc/mihomo/config.yaml, раздел proxy-providers,
- заменив ИМЯ на своё (например gb). Никаких других поправок на шлюзе не нужно:
+ ПОДКЛЮЧИТЬ К ДОМАШНЕМУ ШЛЮЗУ — выполнить НА ШЛЮЗЕ одну строку (скопировать целиком):
 
-${GW_BLOCK}
+   ${GW_CMD}
 
- Затем дописать ИМЯ (и ИМЯ-hy2) в строку use: нужных групп и перечитать конфиг.
+ Она сама добавит сервер «${SERVER_NAME}» в конфиг, проверит и перечитает. Сервер появится в списке
+ тумблера VPN; трафик на него пойдёт, только когда выберешь его в панели сам.
 ${MON_NOTE}
 
  Выход по умолчанию: ${DEFAULT_EXIT}
