@@ -225,7 +225,14 @@ set_opt subPort "${SUB_PORT}"
 set_opt subPath /sub/
 set_opt subCertFile "$CERT"
 set_opt subKeyFile "$KEY"
-ok "подписки на порту ${SUB_PORT}, по защищённому соединению"
+# Подписка в родном формате mihomo (адрес /clash/<id>). Нужна домашнему шлюзу: новое ядро
+# Xray 26.9.8+ пускает по REALITY только клиента с пост-квантовым ключом X25519MLKEM768, а
+# обычная ссылка vless:// этот флаг не несёт. В формате mihomo панель (3.8+) ставит
+# support-x25519mlkem768 и отпечаток сама — на шлюзе не нужно НИКАКИХ поправок, только ссылка.
+# Путь задаём явно: по умолчанию панель придумывает случайный.
+set_opt subClashEnable true
+set_opt subClashPath /clash/
+ok "подписки на порту ${SUB_PORT}, по защищённому соединению (+ формат mihomo: /clash/)"
 
 ###############################################################################
 # 5. Шаблон маршрутизации Xray
@@ -476,6 +483,15 @@ for f in /root/.acme.sh/*/*.conf; do
 	enc=$(sed "s/.*__ACME_BASE64__START_//; s/__ACME_BASE64__END_.*//" <<< "$raw")
 	HOOK="${HOOK}${raw}$(base64 -d <<< "$enc" 2>/dev/null)"
 done
+if [[ "$CREATE_INBOUNDS" == "1" ]]; then
+	CLASH_ID=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic' LIMIT 1" 2>/dev/null)
+	if [[ -n "$CLASH_ID" ]]; then
+		CLASH_BODY=$(curl -sk --max-time 10 "https://127.0.0.1:${SUB_PORT}/clash/${CLASH_ID}")
+		grep -q "support-x25519mlkem768: true" <<< "$CLASH_BODY" \
+			&& ok "подписка для шлюза (формат mihomo) отдаёт пост-квантовый флаг — поправки на шлюзе не нужны" \
+			|| bad "подписка формата mihomo без пост-квантового флага (панель старше 3.8?) — шлюзу понадобится override-expr"
+	fi
+fi
 grep -q "restart x-ui" <<< "$HOOK" \
 	&& ok "автопродление перезапускает панель" \
 	|| bad "в хуке продления нет перезапуска панели — подписки протухнут (x-ui → 20 → 5)"
@@ -485,6 +501,23 @@ grep -q "restart x-ui" <<< "$HOOK" \
 ###############################################################################
 SUB1=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic' LIMIT 1" 2>/dev/null)
 SUBHY=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy' LIMIT 1" 2>/dev/null)
+# Готовый блок для конфига домашнего шлюза: собираем заранее, в итог подставляем переменной.
+gw_block() {   # $1 = имя-заглушка, $2 = id подписки
+	printf '  %s:
+    type: http
+    url: "https://%s:%s/clash/%s"
+    path: ./providers/%s.yaml
+    interval: 86400
+    override: { udp: true }
+    health-check: { enable: true, url: https://www.gstatic.com/generate_204, interval: 300 }
+' 		"$1" "$MAIN_IP" "$SUB_PORT" "$2" "$1"
+}
+GW_BLOCK=$(gw_block "ИМЯ" "$SUB1")
+[[ -n "$SUBHY" ]] && GW_BLOCK="${GW_BLOCK}"$'
+
+'"$(gw_block "ИМЯ-hy2" "$SUBHY")"
+MON_NOTE=""
+[[ "$MON_OK" == "1" ]] && MON_NOTE=" Панель мониторинга VPS увидит сервер сама, как только подписка появится в шлюзе."
 cat <<SUMMARY | tee -a /root/3xui-credentials.txt
 
 ###############################################################################
@@ -494,9 +527,16 @@ cat <<SUMMARY | tee -a /root/3xui-credentials.txt
  Логин:     admin
  Пароль:    ${PANEL_PASS}
 
- Подписка:  https://${MAIN_IP}:${SUB_PORT}/sub/${SUB1}
-$([[ -n "$SUBHY" ]] && echo " Hysteria:  https://${MAIN_IP}:${SUB_PORT}/sub/${SUBHY}   (отдельная подписка для домашнего шлюза)")
-$([[ "$MON_OK" == "1" ]] && echo " Панель мониторинга: сервер появится в ней сам, как только его подписка добавлена в шлюз.")
+ Подписка для телефонов и программ (у каждого клиента своя, см. выше):
+            https://${MAIN_IP}:${SUB_PORT}/sub/${SUB1}
+
+ ДЛЯ ДОМАШНЕГО ШЛЮЗА (mihomo): вставить в /etc/mihomo/config.yaml, раздел proxy-providers,
+ заменив ИМЯ на своё (например gb). Никаких других поправок на шлюзе не нужно:
+
+${GW_BLOCK}
+
+ Затем дописать ИМЯ (и ИМЯ-hy2) в строку use: нужных групп и перечитать конфиг.
+${MON_NOTE}
 
  Выход по умолчанию: ${DEFAULT_EXIT}
  Реквизиты подключений — выше в /root/3xui-credentials.txt

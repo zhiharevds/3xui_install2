@@ -47,12 +47,22 @@ bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 curl -fsSL https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/vps-health.py -o /usr/local/bin/vps-health.py && chmod 755 /usr/local/bin/vps-health.py
 ```
 
-## Новые ядра Xray (26.9.8+, панель 3.8.0) и mihomo
+## Подключение нового сервера к домашнему шлюзу (mihomo)
 
-Новое ядро отвергает приветствие REALITY без пост-квантового ключа X25519MLKEM768. Поэтому
-подключение XHTTP создаётся с отпечатком `chrome` (у `firefox` в mihomo этого ключа нет), а на
-стороне mihomo у подписки нужен флаг `support-x25519mlkem768: true` — ссылка из панели его не
-несёт, он дописывается на шлюзе (`override-expr`). Hysteria это не касается: она не REALITY.
+В конце установки скрипт печатает готовый блок для `/etc/mihomo/config.yaml` (раздел
+`proxy-providers`). Его достаточно вставить, заменив `ИМЯ`, и дописать это имя в `use:` нужных
+групп — **никаких других поправок на шлюзе не нужно**.
+
+Почему так. Новое ядро Xray (26.9.8+, панель 3.8+) отвергает приветствие REALITY без
+пост-квантового ключа X25519MLKEM768, а обычная ссылка `vless://` этот флаг не несёт. Поэтому
+скрипт включает подписку в родном формате mihomo (`https://IP:2096/clash/<id>`): в ней панель сама
+ставит `support-x25519mlkem768: true` и отпечаток `chrome` (у `firefox` в mihomo этого ключа нет —
+подключения создаются с `chrome`). Проверено 2026-09-17 на чистой Ubuntu 24.04, панель 3.8.5,
+Xray 26.9.9, mihomo 1.19.30: по такой подписке REALITY и XHTTP работают без поправок; по обычной
+`/sub/` — отказ «REALITY authentication failed». Самопроверка в конце установки это проверяет.
+
+Телефонам и программам на ядре Xray (v2rayNG, Streisand и т.п.) хватает обычной подписки `/sub/`.
+Hysteria это не касается: она не REALITY.
 
 ## Старый скрипт — `3xui_install2.sh`
 
