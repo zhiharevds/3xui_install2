@@ -10,7 +10,9 @@
 #   автопродление с перезапуском панели, fail2ban.
 # Что дописываем мы (в официальных средствах этого нет):
 #   отключение IPv6 и пинга, файрвол, шаблон маршрутизации, подписка по TLS,
-#   WARP, подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0.
+#   WARP, подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0,
+#   подключение Hysteria 2 (2026-09-17: из дома стабильно быстро работает именно оно),
+#   подключение сервера к домашней панели мониторинга VPS.
 #
 # Запуск (одна команда; unattended-upgrades скрипт останавливает сам, шаг 1):
 #   bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/3xui_install3.sh)
@@ -29,6 +31,8 @@ bad()  { echo -e "  ${red}✗${plain} $*"; }
 SUB_PORT=${SUB_PORT:-2096}            # порт подписок
 PORT_REALITY=${PORT_REALITY:-443}     # подключение REALITY (tcp+vision)
 PORT_XHTTP=${PORT_XHTTP:-8080}        # подключение XHTTP  (его ТСПУ не душит)
+PORT_HY2=${PORT_HY2:-34443}           # подключение Hysteria 2 (UDP)
+DO_HY2=${DO_HY2:-1}                   # 1 = создать подключение Hysteria 2
 DO_UPGRADE=${DO_UPGRADE:-1}           # 1 = обновить систему перед установкой
 DO_WARP=${DO_WARP:-1}                 # 1 = поставить Cloudflare WARP
 CREATE_INBOUNDS=${CREATE_INBOUNDS:-1} # 1 = создать подключения автоматически
@@ -47,6 +51,14 @@ DEFAULT_EXIT=${DEFAULT_EXIT:-direct}
 # а порты всё равно открыты. Выбор сервера в mihomo от этого НЕ зависит —
 # группа «по пингу» на самом деле меряет HTTP-запрос, а не ICMP.
 DISABLE_PING=${DISABLE_PING:-0}
+
+# Домашняя панель мониторинга VPS: шлюз заходит на сервер по ключу, которому разрешена
+# ОДНА команда — запустить проверочный скрипт vps-health.py (он только читает: память,
+# диск, службы, сертификаты). Зайти на сервер или пробросить порт этим ключом нельзя.
+# Ниже — ОТКРЫТАЯ половина ключа, секрета в ней нет; закрытая лежит только на шлюзе.
+DO_MONITOR=${DO_MONITOR:-1}           # 1 = подключить сервер к панели мониторинга
+MONITOR_KEY=${MONITOR_KEY:-"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIQ4nCNWEJQiVKNYgenjk5bdbqTtyhbcoh/gdD/lyZ/"}
+REPO_RAW=${REPO_RAW:-https://raw.githubusercontent.com/zhiharevds/3xui_install2/main}
 
 ###############################################################################
 # 0. Защита от запуска на живом сервере
@@ -109,8 +121,9 @@ ufw --force reset >/dev/null 2>&1
 for p in 22/tcp 80/tcp ${PANEL_PORT}/tcp ${SUB_PORT}/tcp ${PORT_REALITY}/tcp ${PORT_XHTTP}/tcp; do
 	ufw allow $p >/dev/null 2>&1
 done
+[[ "$DO_HY2" == "1" ]] && ufw allow ${PORT_HY2}/udp >/dev/null 2>&1
 ufw --force enable >/dev/null 2>&1
-ok "открыты: 22 (SSH), 80 (выпуск сертификата), ${PANEL_PORT} (панель), ${SUB_PORT} (подписки), ${PORT_REALITY}, ${PORT_XHTTP}"
+ok "открыты: 22 (SSH), 80 (выпуск сертификата), ${PANEL_PORT} (панель), ${SUB_PORT} (подписки), ${PORT_REALITY}, ${PORT_XHTTP}$([[ "$DO_HY2" == "1" ]] && echo ", ${PORT_HY2}/udp (Hysteria)")"
 
 # 🔴 ufw держит СВОЙ файл настроек ядра (/etc/ufw/sysctl.conf, прописан в
 # /etc/default/ufw как IPT_SYSCTL) и применяет его при каждом включении,
@@ -285,11 +298,11 @@ x-ui restart >/dev/null 2>&1
 sleep 5
 
 ###############################################################################
-# 7. Подключения REALITY (443) и XHTTP (8080) через API панели
+# 7. Подключения REALITY (443), XHTTP (8080) и Hysteria 2 (34443/udp) через API панели
 ###############################################################################
 if [[ "$CREATE_INBOUNDS" == "1" ]]; then
 	step "Создание подключений"
-	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP
+	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP PORT_HY2 DO_HY2 CERT KEY
 	python3 <<'PYEOF'
 import json, os, re, secrets, ssl, subprocess, time, urllib.request, urllib.parse, http.cookiejar
 PORT, PATH = os.environ["PANEL_PORT"], os.environ["PANEL_PATH"].rstrip("/")
@@ -334,11 +347,11 @@ def client(n, flow):
             "enable": True, "subId": people[n]["sub"]}
 sniff = json.dumps({"enabled": True, "destOverride": ["http", "tls"]})
 
-def add(remark, port, settings, stream):
+def add(remark, port, settings, stream, protocol="vless", sniffing=sniff):
     r = post("/panel/api/inbounds/add",
-             {"remark": remark, "enable": "true", "port": str(port), "protocol": "vless",
+             {"remark": remark, "enable": "true", "port": str(port), "protocol": protocol,
               "up": "0", "down": "0", "total": "0", "expiryTime": "0", "listen": "",
-              "settings": settings, "streamSettings": stream, "sniffing": sniff}, csrf())
+              "settings": settings, "streamSettings": stream, "sniffing": sniffing}, csrf())
     good = '"success":true' in r
     print("  %s: %s" % (remark, "создано" if good else "ОШИБКА " + r[:120]))
 
@@ -364,20 +377,85 @@ add("reality-8080-xhttp", os.environ["PORT_XHTTP"],
             "show": False, "dest": "twitch.tv:443", "xver": 0, "serverNames": ["api.twitch.tv"],
             "privateKey": pv2, "shortIds": [sid2],
             "minClientVer": "0.0.0",
-            "settings": {"publicKey": pb2, "fingerprint": "firefox", "spiderX": "/"}}}))
+            # chrome, НЕ firefox: Xray 26.9.8+ (панель 3.8.0) отвергает приветствие без
+            # пост-квантового ключа X25519MLKEM768, а отпечаток firefox в mihomo его не умеет —
+            # с ним подключение XHTTP на новом ядре не работало (2026-09-16).
+            # На стороне mihomo нужен ещё флаг support-x25519mlkem768: true — ссылка из
+            # панели его не несёт, он дописывается на шлюзе (override-expr у подписки).
+            "settings": {"publicKey": pb2, "fingerprint": "chrome", "spiderX": "/"}}}))
+
+# --- Hysteria 2 (UDP): из дома работает стабильно быстро там, где TCP душат или теряют
+#     пакеты (NL: 1 → 100 Мбит/с, Москва: 2 → 173). Живёт на том же сертификате, что панель.
+#     Клиенты — «<имя>-hy». У Keenetic (домашний шлюз) СВОЯ подписка: панель мониторинга
+#     меряет по одному узлу на подписку. У людей Hysteria попадает в их общую подписку.
+hy_sub = None
+if os.environ.get("DO_HY2") == "1":
+    if os.path.isfile(os.environ["CERT"]) and os.path.isfile(os.environ["KEY"]):
+        hy_sub = secrets.token_hex(8)
+        ms = int(time.time() * 1000)
+        hy_clients = [{"auth": secrets.token_urlsafe(18), "email": n + "-hy", "enable": True,
+                       "subId": hy_sub if n == "Keenetic" else people[n]["sub"],
+                       "comment": "", "expiryTime": 0, "limitIp": 0, "reset": 0, "security": "",
+                       "tgId": 0, "totalGB": 0, "created_at": ms, "updated_at": ms} for n in names]
+        if "Keenetic" not in names:
+            hy_sub = None
+        add("hysteria2-%s" % os.environ["PORT_HY2"], os.environ["PORT_HY2"],
+            json.dumps({"clients": hy_clients, "version": 2}),
+            json.dumps({"network": "hysteria", "security": "tls",
+                "tlsSettings": {"serverName": "", "minVersion": "1.2", "maxVersion": "1.3",
+                    "cipherSuites": "", "rejectUnknownSni": False, "disableSystemRoot": False,
+                    "enableSessionResumption": False, "alpn": ["h3"], "echServerKeys": "",
+                    "certificates": [{"certificateFile": os.environ["CERT"], "keyFile": os.environ["KEY"],
+                                      "oneTimeLoading": False, "usage": "encipherment", "buildChain": False}],
+                    "settings": {"fingerprint": "", "echConfigList": ""}},
+                "hysteriaSettings": {"version": 2, "auth": "", "udpIdleTimeout": 60},
+                "finalmask": {"tcp": [], "udp": [{"type": "salamander",
+                                                  "settings": {"password": secrets.token_urlsafe(18)}}]}}),
+            protocol="hysteria",
+            sniffing=json.dumps({"enabled": True, "destOverride": ["http", "tls", "quic"]}))
+    else:
+        print("  hysteria2: ПРОПУЩЕНО — нет сертификата (Hysteria без него не работает)")
 
 with open("/root/3xui-credentials.txt", "a") as f:
     f.write(f"\nreality-443       sni=max.ru        pbk={pb}  sid={sid}\n")
     f.write(f"reality-8080-xhttp sni=api.twitch.tv path=/helix/polls pbk={pb2} sid={sid2}\n")
     for n in names:
         f.write(f"  {n:<10} uuid={people[n]['id']}  subId={people[n]['sub']}\n")
+    if hy_sub:
+        f.write(f"hysteria2 (udp {os.environ['PORT_HY2']}): клиенты <имя>-hy; подписка Keenetic-hy subId={hy_sub}\n")
 PYEOF
 	x-ui restart >/dev/null 2>&1
 	sleep 4
 fi
 
 ###############################################################################
-# 8. Самопроверка
+# 8. Панель мониторинга VPS: проверочный скрипт + ключ шлюза с одной разрешённой командой
+###############################################################################
+MON_OK=0
+if [[ "$DO_MONITOR" == "1" ]]; then
+	step "Подключение к панели мониторинга VPS"
+	if curl -fsSL --max-time 20 "${REPO_RAW}/vps-health.py" -o /usr/local/bin/vps-health.py.new \
+		&& python3 -c "import ast,sys; ast.parse(open('/usr/local/bin/vps-health.py.new').read())" 2>/dev/null; then
+		mv /usr/local/bin/vps-health.py.new /usr/local/bin/vps-health.py
+		chmod 755 /usr/local/bin/vps-health.py
+		mkdir -p /root/.ssh && chmod 700 /root/.ssh
+		touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+		MON_LINE="command=\"/usr/bin/python3 /usr/local/bin/vps-health.py\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ${MONITOR_KEY} vpsdash@gateway"
+		grep -qF "${MONITOR_KEY}" /root/.ssh/authorized_keys || echo "$MON_LINE" >> /root/.ssh/authorized_keys
+		if /usr/local/bin/vps-health.py 2>/dev/null | tail -1 | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+			MON_OK=1
+			ok "проверочный скрипт работает, ключ панели прописан (ему разрешена только эта команда)"
+		else
+			bad "проверочный скрипт поставлен, но не отработал: /usr/local/bin/vps-health.py"
+		fi
+	else
+		rm -f /usr/local/bin/vps-health.py.new
+		bad "не удалось скачать ${REPO_RAW}/vps-health.py — панель мониторинга сервер не увидит"
+	fi
+fi
+
+###############################################################################
+# 9. Самопроверка
 ###############################################################################
 step "Самопроверка"
 /usr/local/x-ui/bin/xray-linux-amd64 -test -config /usr/local/x-ui/bin/config.json 2>&1 | tail -1
@@ -385,6 +463,9 @@ journalctl -u x-ui --no-pager 2>/dev/null | grep "Web server running" | tail -1 
 for p in "${PANEL_PORT}" "${SUB_PORT}" "${PORT_REALITY}" "${PORT_XHTTP}"; do
 	ss -tln | grep -q ":${p} " && ok "порт ${p} слушает" || bad "порт ${p} НЕ слушает"
 done
+if [[ "$DO_HY2" == "1" && "$CREATE_INBOUNDS" == "1" ]]; then
+	ss -uln | grep -q ":${PORT_HY2} " && ok "порт ${PORT_HY2}/udp слушает (Hysteria)" || bad "порт ${PORT_HY2}/udp НЕ слушает (Hysteria)"
+fi
 printf "  панель отвечает: %s (%s)
 " "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "${PANEL_SCHEME}://${MAIN_IP}:${PANEL_PORT}${PANEL_PATH}")" "${PANEL_SCHEME}"
 # acme.sh хранит команду перезапуска в base64 — простым grep её не найти.
@@ -400,9 +481,10 @@ grep -q "restart x-ui" <<< "$HOOK" \
 	|| bad "в хуке продления нет перезапуска панели — подписки протухнут (x-ui → 20 → 5)"
 
 ###############################################################################
-# 9. Итог
+# 10. Итог
 ###############################################################################
 SUB1=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic' LIMIT 1" 2>/dev/null)
+SUBHY=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy' LIMIT 1" 2>/dev/null)
 cat <<SUMMARY | tee -a /root/3xui-credentials.txt
 
 ###############################################################################
@@ -413,6 +495,8 @@ cat <<SUMMARY | tee -a /root/3xui-credentials.txt
  Пароль:    ${PANEL_PASS}
 
  Подписка:  https://${MAIN_IP}:${SUB_PORT}/sub/${SUB1}
+$([[ -n "$SUBHY" ]] && echo " Hysteria:  https://${MAIN_IP}:${SUB_PORT}/sub/${SUBHY}   (отдельная подписка для домашнего шлюза)")
+$([[ "$MON_OK" == "1" ]] && echo " Панель мониторинга: сервер появится в ней сам, как только его подписка добавлена в шлюз.")
 
  Выход по умолчанию: ${DEFAULT_EXIT}
  Реквизиты подключений — выше в /root/3xui-credentials.txt
