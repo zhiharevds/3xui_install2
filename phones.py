@@ -7,6 +7,7 @@
   sudo phones del ИМЯ         удалить устройство: его ключ перестаёт работать (потерян телефон и т.п.)
   sudo phones rename ИМЯ НОВОЕ   переименовать; ключи те же, уже добавленные в Happ узлы работают дальше
   sudo phones json            всё то же для страницы панели мониторинга (ссылки + QR в SVG)
+  sudo phones doors           входы домой (VPS и порт) и маскировочное имя — для проверки в панели мониторинга; ключей нет
 
 Ключи живут только на шлюзе: /etc/mihomo/phones/secrets.json (вне git). На VPS их нет —
 VPS лишь перекладывает порт в обратный туннель («слепая труба»).
@@ -97,7 +98,7 @@ def as_json(s):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ("list", "link", "add", "del", "rename", "json") or (a[0] not in ("list", "json") and len(a) < 2):
+    if not a or a[0] not in ("list", "link", "add", "del", "rename", "json", "doors") or (a[0] not in ("list", "json", "doors") and len(a) < 2):
         sys.exit(__doc__)
     if os.geteuid() != 0: sys.exit("запускать через sudo")
     s = load()
@@ -105,6 +106,8 @@ def main():
         print("\n".join(s["users"])); return
     if a[0] == "json":
         as_json(s); return
+    if a[0] == "doors":
+        print(json.dumps({"doors": s["doors"], "sni": s["reality"]["sni"]}, ensure_ascii=False)); return
     n = a[1]
     if a[0] == "link":
         if n not in s["users"]: sys.exit(f"нет такого: {n}. Есть: {', '.join(s['users'])}")
