@@ -60,25 +60,10 @@ def apply(s, msg):
     subprocess.run(["git", "-C", "/etc/mihomo", "commit", "-q", "-am", msg])
     reload_now()
 
-PENDING = "/etc/mihomo/phones/.reload-pending"
-
-def game_running():
-    # Перечитывание конфига сбивает игре подставные адреса, и она вылетает (Р-62) — при игре откладываем.
-    try:
-        d = json.load(urllib.request.urlopen("http://127.0.0.1:9090/connections", timeout=10))
-        return any("nexon" in (c["metadata"].get("host") or "") for c in d.get("connections") or [])
-    except Exception:
-        return False
-
 def reload_now():
-    if game_running():
-        open(PENDING, "w").write("1")
-        print("ОТЛОЖЕНО: на шлюзе идёт игра. Изменение сохранено и включится само после закрытия игры.")
-        return False
     rq = urllib.request.Request("http://127.0.0.1:9090/configs?force=false", method="PUT",
                                 data=json.dumps({"path": CFG}).encode(), headers={"Content-Type": "application/json"})
     ok = urllib.request.urlopen(rq, timeout=20).status == 204
-    if ok and os.path.exists(PENDING): os.remove(PENDING)
     print("конфиг шлюза перечитан:", ok)
     return ok
 
@@ -108,7 +93,7 @@ def as_json(s):
             q = subprocess.run(["qrencode", "-t", "SVG", "-m", "2", "-o", "-", link], capture_output=True, text=True)
             items.append({"title": title, "link": link, "svg": q.stdout[q.stdout.find("<svg"):] if q.returncode == 0 else ""})
         out.append({"name": n, "links": items})
-    print(json.dumps({"users": out, "doors": s["doors"], "pending": os.path.exists(PENDING)}, ensure_ascii=False))
+    print(json.dumps({"users": out, "doors": s["doors"]}, ensure_ascii=False))
 
 def main():
     a = sys.argv[1:]
@@ -119,9 +104,6 @@ def main():
     if a[0] == "list":
         print("\n".join(s["users"])); return
     if a[0] == "json":
-        if os.path.exists(PENDING) and not game_running():
-            import contextlib, io
-            with contextlib.redirect_stdout(io.StringIO()): reload_now()
         as_json(s); return
     n = a[1]
     if a[0] == "link":
