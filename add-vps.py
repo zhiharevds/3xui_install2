@@ -120,7 +120,7 @@ def pipe_edit(name, pid, tok=None):
     os.replace(tmp, PIPE_CFG); os.chmod(PIPE_CFG, 0o644)
     sec["doors"] = doors; json.dump(sec, open(PHONES, "w"), indent=1, ensure_ascii=False); os.chmod(PHONES, 0o600)
     subprocess.run(["systemctl", "restart", "home-pipe"])
-    print(f"✓ вход домой через {name}: " + ("трубы подключены, ссылки появились на странице «Подключение устройств»" if tok else "убран"))
+    print(f"✓ вход домой через {name}: " + ("обратный туннель подключён, ссылки появились на странице «Подключение устройств»" if tok else "убран"))
     return True
 
 

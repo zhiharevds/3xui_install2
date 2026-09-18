@@ -517,7 +517,7 @@ if [[ "$DO_HOME" == "1" && "$CREATE_INBOUNDS" == "1" ]]; then
 			HOME_TOKEN=$(cat /root/home-pipe.token 2>/dev/null)
 		fi
 		sleep 3
-		[[ -n "$HOME_TOKEN" ]] && ok "трубы и дверь созданы (в панели — входы HOME-*)" || bad "вход домой не создан — см. сообщения выше"
+		[[ -n "$HOME_TOKEN" ]] && ok "обратный туннель и вход для устройств созданы (в панели — входы HOME-*)" || bad "вход домой не создан — см. сообщения выше"
 	else
 		rm -f /usr/local/bin/home-pipe.py.new
 		bad "не удалось скачать ${REPO_RAW}/home-pipe.py — входа домой на этом сервере не будет"

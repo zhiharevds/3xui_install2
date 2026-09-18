@@ -121,7 +121,7 @@ if hy_ok:
                          "certificates": [{"certificateFile": cert, "keyFile": key}]},
          "hysteriaSettings": {"version": 2, "auth": "home-pipe", "udpIdleTimeout": 60}})
 else:
-    print("  HOME-PIPE-HY: ПРОПУЩЕНО — у панели нет сертификата (останется труба по TCP)")
+    print("  HOME-PIPE-HY: ПРОПУЩЕНО — у панели нет сертификата (обратный туннель будет только по TCP)")
 add("HOME-PIPE-TCP", a.port_tcp, "vless",
     {"clients": [client("home-pipe-tcp", keys["u_tcp"])], "decryption": keys["dec"], "encryption": keys["enc"]},
     {"network": "tcp", "security": "none", "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}}})
@@ -140,7 +140,7 @@ if not any(r.get("outboundTag") == TAG for r in rules):
     pos = 1 if rules and rules[0].get("outboundTag") == "api" else 0
     rules.insert(pos, {"type": "field", "inboundTag": [door], "outboundTag": TAG})
     ok = '"success":true' in post("/panel/api/xray/update", {"xraySetting": json.dumps(xs, indent=2)})
-    print("  правило маршрута «дверь → труба»: " + ("добавлено" if ok else "ОШИБКА"))
+    print("  правило маршрута «вход → обратный туннель»: " + ("добавлено" if ok else "ОШИБКА"))
 post("/panel/api/server/restartXrayService", {})
 
 for p_ in (f"{a.port_hy}/udp", f"{a.port_tcp}/tcp", f"{a.port_door}/tcp", f"{a.port_door}/udp"):
