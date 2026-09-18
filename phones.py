@@ -8,6 +8,7 @@
   sudo phones rename ИМЯ НОВОЕ   переименовать; ключи те же, уже добавленные в Happ узлы работают дальше
   sudo phones json            всё то же для страницы панели мониторинга (ссылки + QR в SVG)
   sudo phones obfs on|off     маскировка входа Hysteria (salamander): оператор не видит, что это QUIC. Меняет ссылки Hysteria у всех
+  sudo phones clash ИМЯ       профиль для программ на ядре mihomo (FlClash, Clash Meta): те же входы одним файлом
   sudo phones doors           входы домой (VPS и порт) и маскировочное имя — для проверки в панели мониторинга; ключей нет
 
 Ключи живут только на шлюзе: /etc/mihomo/phones/secrets.json (вне git). На VPS их нет —
@@ -92,6 +93,34 @@ def show(s, name):
         q = subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "1", link], capture_output=True, text=True)
         print(q.stdout if q.returncode == 0 else "(QR не нарисован: sudo apt install qrencode)")
 
+def clash(s, name):
+    """Профиль формата mihomo: FlClash и Clash Meta ссылок и QR не читают, им нужен файл настроек.
+    Всё идёт домой (правило одно — MATCH), имена сайтов на телефоне не ищутся: уезжают домой как есть."""
+    u, r = s["users"][name], s["reality"]
+    pin = ":".join(s["hy2_pin"][i:i + 2] for i in range(0, len(s["hy2_pin"]), 2))
+    P, names = [], []
+    for d in s["doors"]:
+        hy, xh = f"Дом {d['name']} Hysteria", f"Дом {d['name']} XHTTP"
+        names += [hy, xh]
+        P += [f"  - name: \"{hy}\"", "    type: hysteria2", f"    server: {d['host']}", f"    port: {d['port']}",
+              f"    password: \"{u['hy2']}\"", "    sni: home.phones", f"    fingerprint: \"{pin}\"", "    alpn: [h3]"]
+        if s.get("hy2_obfs"):
+            P += ["    obfs: salamander", f"    obfs-password: \"{s['hy2_obfs']}\""]
+        P += [f"  - name: \"{xh}\"", "    type: vless", f"    server: {d['host']}", f"    port: {d['port']}",
+              f"    uuid: {u['uuid']}", "    udp: true", "    tls: true", "    network: xhttp", f"    servername: {r['sni']}",
+              "    client-fingerprint: chrome",
+              f"    reality-opts: {{ public-key: {r['public']}, short-id: \"{r['short_id']}\" }}",
+              f"    xhttp-opts: {{ path: {s['xhttp_path']}, mode: auto }}"]
+    L = ["# Вход домой: " + name + ". Файл собран командой шлюза phones — руками не править, взять новый на странице «Подключение устройств».",
+         "mode: rule", "ipv6: false", "log-level: warning", "unified-delay: true",
+         "dns:", "  enable: true", "  ipv6: false", "  enhanced-mode: fake-ip", "  fake-ip-range: 198.19.0.1/16",
+         "  respect-rules: true", "  nameserver: [8.8.8.8, 1.1.1.1]", "  proxy-server-nameserver: [8.8.8.8, 1.1.1.1]",
+         "proxies:"] + P + [
+         "proxy-groups:",
+         "  - name: \"Дом\"", "    type: select", "    proxies: [" + ", ".join(f'"{n}"' for n in names) + "]",
+         "rules:", "  - MATCH,Дом", ""]
+    print(chr(10).join(L))
+
 def as_json(s):
     out = []
     for n in s["users"]:
@@ -104,7 +133,7 @@ def as_json(s):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ("list", "link", "add", "del", "rename", "json", "doors", "obfs") or (a[0] not in ("list", "json", "doors") and len(a) < 2):
+    if not a or a[0] not in ("list", "link", "add", "del", "rename", "json", "doors", "obfs", "clash") or (a[0] not in ("list", "json", "doors") and len(a) < 2):
         sys.exit(__doc__)
     if os.geteuid() != 0: sys.exit("запускать через sudo")
     s = load()
@@ -121,6 +150,9 @@ def main():
         else: s.pop("hy2_obfs", None)
         apply(s, f"phones: маскировка входа Hysteria {n} (Р-67)"); print("маскировка Hysteria:", n, "— ссылки Hysteria изменились, QR пересканировать")
         return
+    if a[0] == "clash":
+        if n not in s["users"]: sys.exit(f"нет такого: {n}. Есть: {', '.join(s['users'])}")
+        clash(s, n); return
     if a[0] == "link":
         if n not in s["users"]: sys.exit(f"нет такого: {n}. Есть: {', '.join(s['users'])}")
         show(s, n)
