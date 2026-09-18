@@ -4,6 +4,8 @@
 # 3xui_install3.sh в конце своей работы.
 #
 #   sudo add-vps GB-113 https://IP:2096/clash/<id> [https://IP:2096/clash/<id-hysteria>]
+#   sudo add-vps GB-113 … --pipe <строка>   то же + вход «телефон вне дома → дом» через этот сервер
+#   sudo add-vps GB-113 --pipe <строка>     только вход домой (сервер в шлюзе уже есть)
 #   sudo add-vps --remove GB-113
 #   sudo add-vps --reload            (перечитать конфиг, если в прошлый раз помешала игра)
 #
@@ -11,12 +13,15 @@
 # (только в СПИСОК — трафик на него не пойдёт, пока сам не выберешь его в панели), проверяет
 # конфиг (mihomo -t), сохраняет в git и перечитывает. Если проверка не прошла — возвращает как было.
 # Конфиг правится как текст, комментарии не трогаются.
-import argparse, json, os, re, subprocess, sys, urllib.request
+import argparse, base64, json, os, re, subprocess, sys, urllib.request
 
 HOME = "/etc/mihomo"
 CONFIG = HOME + "/config.yaml"
 API = "http://127.0.0.1:9090"
 LIST_GROUP = "VPN"  # тумблер со списком «любой сервер поштучно»
+PIPE_DIR = "/opt/home-pipe"                      # служба home-pipe: обратный туннель шлюз → VPS (Р-66)
+PIPE_CFG = PIPE_DIR + "/config.json"
+PHONES = HOME + "/phones/secrets.json"           # ключи людей и список входов (ведёт команда phones)
 
 
 def die(msg):
@@ -80,6 +85,55 @@ def remove_everywhere(s, pids):
     return re.sub(r"^(    use: \[)([^\]]*)(\])", fix, s, flags=re.M)
 
 
+def pipe_token(tok):
+    try:
+        t = json.loads(base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)))
+        assert t["h"] and t["tcp"] and t["door"] and t["enc"]
+        return t
+    except Exception:
+        die("строка --pipe повреждена — скопируй её целиком из вывода установщика")
+
+
+def pipe_edit(name, pid, tok=None):
+    """Добавляет (tok задан) или убирает (tok=None) трубы к серверу в службе home-pipe и вход в список phones.
+    mihomo не трогает — перечитывать конфиг для этого не нужно."""
+    if not os.path.isfile(PIPE_CFG) or not os.path.isfile(PHONES):
+        print("! на этом шлюзе нет службы home-pipe / входов для телефонов — часть --pipe пропущена"); return False
+    cfg = json.load(open(PIPE_CFG)); sec = json.load(open(PHONES))
+    tags = (pid + "-hy", pid + "-tcp")
+    cfg["outbounds"] = [o for o in cfg["outbounds"] if o.get("tag") not in tags]
+    doors = [d for d in sec.get("doors") or [{"name": "RU", "host": "130.17.11.191", "port": 2053}] if d["name"] != name]
+    if tok:
+        def out(tag, port, uid, stream):
+            return {"protocol": "vless", "tag": tag, "streamSettings": stream,
+                    "settings": {"address": tok["h"], "port": port, "encryption": tok["enc"], "id": uid, "reverse": {"tag": "r-in"}}}
+        if tok.get("hy"):
+            cfg["outbounds"].append(out(tags[0], tok["hy"], tok["uhy"], {
+                "network": "hysteria", "hysteriaSettings": {"version": 2, "auth": "home-pipe"}, "security": "tls",
+                "tlsSettings": {"serverName": tok["h"], "alpn": ["h3"]}}))
+        cfg["outbounds"].append(out(tags[1], tok["tcp"], tok["utcp"], {"network": "raw"}))
+        doors.append({"name": name, "host": tok["h"], "port": tok["door"]})
+    tmp = PIPE_DIR + "/config.new.json" if PIPE_CFG.startswith(PIPE_DIR) else PIPE_CFG + ".new.json"; json.dump(cfg, open(tmp, "w"), indent=1)
+    t = subprocess.run([PIPE_DIR + "/xray", "run", "-test", "-c", tmp], capture_output=True, text=True)
+    if "Configuration OK" not in t.stdout + t.stderr:
+        os.remove(tmp); print((t.stdout + t.stderr).strip()[-300:]); die("проверка конфига home-pipe не прошла — не тронут")
+    os.replace(tmp, PIPE_CFG); os.chmod(PIPE_CFG, 0o644)
+    sec["doors"] = doors; json.dump(sec, open(PHONES, "w"), indent=1, ensure_ascii=False); os.chmod(PHONES, 0o600)
+    subprocess.run(["systemctl", "restart", "home-pipe"])
+    print(f"✓ вход домой через {name}: " + ("трубы подключены, ссылки появились на странице «Подключение устройств»" if tok else "убран"))
+    return True
+
+
+def direct_rule(s, ip, name, add=True):
+    """Адрес VPS — всегда напрямую: иначе трубу службы home-pipe правила завернут в туннель."""
+    line = f"  - IP-CIDR,{ip}/32,DIRECT,no-resolve   # add-vps: {name}\n"
+    s = re.sub(rf"^  - IP-CIDR,[0-9.]+/32,DIRECT,no-resolve   # add-vps: {re.escape(name)}\n", "", s, flags=re.M)
+    if add and f"IP-CIDR,{ip}/32,DIRECT" not in s:
+        m = re.search(r"^rules:[ ]*\n", s, re.M)
+        s = s[:m.end()] + line + s[m.end():]
+    return s
+
+
 def game_running():
     try:
         cs = json.load(urllib.request.urlopen(API + "/connections", timeout=10)).get("connections") or []
@@ -109,6 +163,7 @@ def main():
     ap.add_argument("name", nargs="?", help="имя сервера, как напечатал установщик (например GB-113)")
     ap.add_argument("url", nargs="?", help="ссылка подписки формата mihomo (/clash/...)")
     ap.add_argument("hy_url", nargs="?", help="ссылка подписки Hysteria (/clash/...), если есть")
+    ap.add_argument("--pipe", help="строка от установщика: вход «телефон вне дома → дом» через этот сервер")
     ap.add_argument("--remove", action="store_true", help="убрать сервер из шлюза")
     ap.add_argument("--reload", action="store_true", help="только перечитать конфиг")
     ap.add_argument("--config", default=CONFIG, help=argparse.SUPPRESS)
@@ -128,11 +183,18 @@ def main():
     pids = [pid, pid + "-hy2"]
     old = open(a.config, encoding="utf-8").read()
 
+    tok = pipe_token(a.pipe) if a.pipe else None
+    if a.url and not a.hy_url and "/clash/" not in a.url and not a.pipe and len(a.url) > 120:
+        die("похоже, это строка --pipe: перед ней нужно слово --pipe")
     if a.remove:
-        if not any(has_provider(old, p) for p in pids):
+        had_pipe = pipe_edit(a.name, pid, None) if a.config == CONFIG else False
+        if not any(has_provider(old, p) for p in pids) and not had_pipe:
             die(f"сервера «{pid}» в конфиге нет")
-        new = remove_everywhere(old, pids)
+        new = direct_rule(remove_everywhere(old, pids), "0.0.0.0", a.name, add=False)
         what = f"Сервер {a.name} убран из шлюза"
+    elif tok and not a.url:
+        new = direct_rule(old, tok["h"], a.name)
+        what = f"Вход домой через {a.name}"
     else:
         if not a.url:
             die("не указана ссылка подписки")
@@ -149,6 +211,8 @@ def main():
         _, b = providers_section(old)
         new = old[:b] + blocks + old[b:]
         new = edit_use(new, LIST_GROUP, add=added)
+        if tok:
+            new = direct_rule(new, tok["h"], a.name)
         what = f"Сервер {a.name} добавлен в шлюз"
 
     open(a.config, "w", encoding="utf-8").write(new)
@@ -160,6 +224,8 @@ def main():
     print("✓ конфиг поправлен и прошёл проверку")
     if a.no_apply:
         return
+    if tok and not a.remove:
+        pipe_edit(a.name, pid, tok)
 
     if a.remove:  # скачанные файлы подписок убранного сервера больше не нужны
         for p_ in pids:
@@ -169,7 +235,9 @@ def main():
                 pass
     subprocess.run(["git", "-C", HOME, "commit", "-qam", what + " (add-vps)"], capture_output=True)
     print("✓ сохранено в git: " + what)
-    if reload_config(a) and not a.remove:
+    if new == old:
+        return
+    if reload_config(a) and not a.remove and a.url:
         print(f"Готово. В панели узлов сервер появится в списке тумблера «{LIST_GROUP}»; трафик на него пойдёт,")
         print("только когда выберешь его сам. В панели мониторинга VPS он покажется при следующем замере.")
 

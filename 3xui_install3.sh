@@ -12,7 +12,8 @@
 #   отключение IPv6 и пинга, файрвол, шаблон маршрутизации, подписка по TLS,
 #   WARP, подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0,
 #   подключение Hysteria 2 (2026-09-17: из дома стабильно быстро работает именно оно),
-#   подключение сервера к домашней панели мониторинга VPS.
+#   подключение сервера к домашней панели мониторинга VPS,
+#   вход «телефон вне дома → домашний шлюз» (обратный туннель, входы HOME-* в панели; home-pipe.py).
 #
 # Запуск (одна команда; unattended-upgrades скрипт останавливает сам, шаг 1):
 #   bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/3xui_install3.sh)
@@ -59,6 +60,10 @@ DISABLE_PING=${DISABLE_PING:-0}
 # ОДНА команда — запустить проверочный скрипт vps-health.py (он только читает: память,
 # диск, службы, сертификаты). Зайти на сервер или пробросить порт этим ключом нельзя.
 # Ниже — ОТКРЫТАЯ половина ключа, секрета в ней нет; закрытая лежит только на шлюзе.
+DO_HOME=${DO_HOME:-1}                 # 1 = вход «телефон вне дома → домашний шлюз» (входы HOME-* в панели)
+PORT_PIPE_HY=${PORT_PIPE_HY:-58932}   #   труба шлюза, Hysteria-транспорт (UDP)
+PORT_PIPE_TCP=${PORT_PIPE_TCP:-58930} #   труба шлюза, запасная (TCP)
+PORT_DOOR=${PORT_DOOR:-2053}          #   дверь для телефонов (TCP и UDP)
 DO_MONITOR=${DO_MONITOR:-1}           # 1 = подключить сервер к панели мониторинга
 MONITOR_KEY=${MONITOR_KEY:-"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILIQ4nCNWEJQiVKNYgenjk5bdbqTtyhbcoh/gdD/lyZ/"}
 REPO_RAW=${REPO_RAW:-https://raw.githubusercontent.com/zhiharevds/3xui_install2/main}
@@ -445,6 +450,27 @@ PYEOF
 fi
 
 ###############################################################################
+# 7б. Вход «телефон вне дома → домашний шлюз»: трубы и дверь в панели (home-pipe.py из репозитория).
+#     Сервер ничего не расшифровывает; ключи телефонов живут только на домашнем шлюзе.
+###############################################################################
+HOME_TOKEN=""
+if [[ "$DO_HOME" == "1" && "$CREATE_INBOUNDS" == "1" ]]; then
+	step "Вход домой для телефонов (обратный туннель)"
+	if curl -fsSL --max-time 20 "${REPO_RAW}/home-pipe.py" -o /usr/local/bin/home-pipe.py.new 		&& python3 -c "import ast; ast.parse(open('/usr/local/bin/home-pipe.py.new').read())" 2>/dev/null; then
+		mv /usr/local/bin/home-pipe.py.new /usr/local/bin/home-pipe.py
+		export PANEL_PASS MAIN_IP CERT KEY PORT_PIPE_HY PORT_PIPE_TCP PORT_DOOR
+		if python3 /usr/local/bin/home-pipe.py --name "$SERVER_NAME" | grep -v "add-vps\|НА ШЛЮЗЕ" | sed '/^$/d'; then
+			HOME_TOKEN=$(cat /root/home-pipe.token 2>/dev/null)
+		fi
+		sleep 3
+		[[ -n "$HOME_TOKEN" ]] && ok "трубы и дверь созданы (в панели — входы HOME-*)" || bad "вход домой не создан — см. сообщения выше"
+	else
+		rm -f /usr/local/bin/home-pipe.py.new
+		bad "не удалось скачать ${REPO_RAW}/home-pipe.py — входа домой на этом сервере не будет"
+	fi
+fi
+
+###############################################################################
 # 8. Панель мониторинга VPS: проверочный скрипт + ключ шлюза с одной разрешённой командой
 ###############################################################################
 MON_OK=0
@@ -514,6 +540,7 @@ SUBHY=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy' LIMI
 # и перечитает (команда add-vps лежит на шлюзе; исходник — add-vps.py в этом репозитории).
 GW_CMD="sudo add-vps ${SERVER_NAME} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUB1}\""
 [[ -n "$SUBHY" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBHY}\""
+[[ -n "$HOME_TOKEN" ]] && GW_CMD="${GW_CMD} --pipe ${HOME_TOKEN}"
 MON_NOTE=""
 [[ "$MON_OK" == "1" ]] && MON_NOTE=" В панели мониторинга VPS сервер появится сам при следующем замере."
 cat <<SUMMARY | tee -a /root/3xui-credentials.txt
@@ -534,6 +561,9 @@ cat <<SUMMARY | tee -a /root/3xui-credentials.txt
 
  Она сама добавит сервер «${SERVER_NAME}» в конфиг, проверит и перечитает. Сервер появится в списке
  тумблера VPN; трафик на него пойдёт, только когда выберешь его в панели сам.
+ Если в строке есть --pipe: шлюз заодно подключится к этому серверу обратным туннелем, и у всех
+ устройств на странице «Подключение устройств» появится ещё один вход домой — через «${SERVER_NAME}».
+ После правки входов HOME-* в панели мышкой — нажать «Перезапустить Xray», иначе вход домой замолчит.
 ${MON_NOTE}
 
  Выход по умолчанию: ${DEFAULT_EXIT}
