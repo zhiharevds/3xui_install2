@@ -7,6 +7,7 @@
   sudo phones del ИМЯ         удалить устройство: его ключ перестаёт работать (потерян телефон и т.п.)
   sudo phones rename ИМЯ НОВОЕ   переименовать; ключи те же, уже добавленные в Happ узлы работают дальше
   sudo phones json            всё то же для страницы панели мониторинга (ссылки + QR в SVG)
+  sudo phones obfs on|off     маскировка входа Hysteria (salamander): оператор не видит, что это QUIC. Меняет ссылки Hysteria у всех
   sudo phones doors           входы домой (VPS и порт) и маскировочное имя — для проверки в панели мониторинга; ключей нет
 
 Ключи живут только на шлюзе: /etc/mihomo/phones/secrets.json (вне git). На VPS их нет —
@@ -35,7 +36,11 @@ def block(s):
     r, p = s["reality"], s["listen_port"]
     L = [BEGIN, "listeners:",
          "  - name: phones-hy2", "    type: hysteria2", "    listen: 127.0.0.1", f"    port: {p}",
-         "    certificate: ./phones/hy2.crt", "    private-key: ./phones/hy2.key", "    users:"]
+         "    certificate: ./phones/hy2.crt", "    private-key: ./phones/hy2.key"]
+    if s.get("hy2_obfs"):
+        # без маскировки мобильный оператор видит QUIC и портит его: первое подключение висело по 30 с (2026-09-18)
+        L += ["    obfs: salamander", f"    obfs-password: {s['hy2_obfs']}"]
+    L += ["    users:"]
     L += [f"      {n}: {v['hy2']}" for n, v in s["users"].items()]
     L += ["  - name: phones-vless", "    type: vless", "    listen: 127.0.0.1", f"    port: {p}", "    users:"]
     L += [f"      - {{ username: {n}, uuid: {v['uuid']} }}" for n, v in s["users"].items()]
@@ -74,7 +79,8 @@ def links(s, name):
     for d in s["doors"]:
         tag = up.quote(f"Дом {d['name']}")
         out.append((f"Hysteria через {d['name']} (основной)",
-            f"hysteria2://{up.quote(u['hy2'])}@{d['host']}:{d['port']}/?sni=home.phones&insecure=1&pinSHA256={s['hy2_pin']}#{tag}%20Hysteria"))
+            f"hysteria2://{up.quote(u['hy2'])}@{d['host']}:{d['port']}/?sni=home.phones&insecure=1&pinSHA256={s['hy2_pin']}"
+            + (f"&obfs=salamander&obfs-password={up.quote(s['hy2_obfs'])}" if s.get("hy2_obfs") else "") + f"#{tag}%20Hysteria"))
         out.append((f"XHTTP через {d['name']} (запасной, TCP)",
             f"vless://{u['uuid']}@{d['host']}:{d['port']}?type=xhttp&path={up.quote(s['xhttp_path'], safe='')}&mode=auto&security=reality"
             f"&pbk={r['public']}&sid={r['short_id']}&sni={r['sni']}&fp=chrome&encryption=none#{tag}%20XHTTP"))
@@ -98,7 +104,7 @@ def as_json(s):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ("list", "link", "add", "del", "rename", "json", "doors") or (a[0] not in ("list", "json", "doors") and len(a) < 2):
+    if not a or a[0] not in ("list", "link", "add", "del", "rename", "json", "doors", "obfs") or (a[0] not in ("list", "json", "doors") and len(a) < 2):
         sys.exit(__doc__)
     if os.geteuid() != 0: sys.exit("запускать через sudo")
     s = load()
@@ -109,6 +115,12 @@ def main():
     if a[0] == "doors":
         print(json.dumps({"doors": s["doors"], "sni": s["reality"]["sni"]}, ensure_ascii=False)); return
     n = a[1]
+    if a[0] == "obfs":
+        if n not in ("on", "off"): sys.exit("sudo phones obfs on|off")
+        if n == "on": s.setdefault("hy2_obfs", secrets.token_urlsafe(18))
+        else: s.pop("hy2_obfs", None)
+        apply(s, f"phones: маскировка входа Hysteria {n} (Р-67)"); print("маскировка Hysteria:", n, "— ссылки Hysteria изменились, QR пересканировать")
+        return
     if a[0] == "link":
         if n not in s["users"]: sys.exit(f"нет такого: {n}. Есть: {', '.join(s['users'])}")
         show(s, n)
