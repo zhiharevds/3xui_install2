@@ -257,7 +257,7 @@ if [[ "$DEFAULT_EXIT" == "warp" ]]; then
 else
 	OUT_ORDER='"direct","warp-cli","blocked"'
 fi
-python3 - "$OUT_ORDER" <<'PY' > /tmp/xtpl.json
+python3 - "$OUT_ORDER" "$DO_WARP" <<'PY' > /tmp/xtpl.json
 import json, sys
 outs = {
  "direct":   {"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"UseIPv4"}},
@@ -283,6 +283,12 @@ tpl = {
  "stats": {},
  "dns": {"queryStrategy":"UseIPv4","servers":["https+local://1.1.1.1/dns-query","https+local://8.8.8.8/dns-query"]},
 }
+# Запасной вход «через WARP»: клиент Keenetic-hy-warp (Hysteria) целиком выходит через Cloudflare WARP.
+# Зачем: адрес сервера Google может счесть российским (так было на HIP-NL и HIP-USA — сеть записана
+# на владельца из РФ), а через WARP видит страну сервера. Делается при ЛЮБОЙ установке: заранее
+# не узнать, каким Google увидит новый адрес. Только TCP — WARP-прокси UDP не умеет.
+if sys.argv[2] == "1":
+    tpl["routing"]["rules"].insert(3, {"type":"field","user":["Keenetic-hy-warp"],"network":"tcp","outboundTag":"warp-cli"})
 print(json.dumps(tpl, ensure_ascii=False, indent=2))
 PY
 sqlite3 "$DB" "DELETE FROM settings WHERE key='xrayTemplateConfig';
@@ -322,7 +328,7 @@ sleep 5
 ###############################################################################
 if [[ "$CREATE_INBOUNDS" == "1" ]]; then
 	step "Создание подключений"
-	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP PORT_HY2 DO_HY2 CERT KEY SERVER_NAME
+	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP PORT_HY2 DO_HY2 DO_WARP CERT KEY SERVER_NAME
 	python3 <<'PYEOF'
 import json, os, re, secrets, ssl, subprocess, time, urllib.request, urllib.parse, http.cookiejar
 PORT, PATH = os.environ["PANEL_PORT"], os.environ["PANEL_PATH"].rstrip("/")
@@ -420,6 +426,11 @@ if os.environ.get("DO_HY2") == "1":
                        "tgId": 0, "totalGB": 0, "created_at": ms, "updated_at": ms} for n in names]
         if "Keenetic" not in names:
             hy_sub = None
+        elif os.environ.get("DO_WARP") == "1":
+            # запасной вход шлюза «через WARP» (правило маршрута — в шаблоне, шаг 5); своя подписка
+            hy_clients.append(dict(hy_clients[names.index("Keenetic")], email="Keenetic-hy-warp",
+                                   auth=secrets.token_urlsafe(18), subId=secrets.token_hex(8),
+                                   comment="выход через WARP"))
         add(SRV + "-HY2", os.environ["PORT_HY2"],
             json.dumps({"clients": hy_clients, "version": 2}),
             json.dumps({"network": "hysteria", "security": "tls",
@@ -540,6 +551,8 @@ SUBHY=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy' LIMI
 # и перечитает (команда add-vps лежит на шлюзе; исходник — add-vps.py в этом репозитории).
 GW_CMD="sudo add-vps ${SERVER_NAME} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUB1}\""
 [[ -n "$SUBHY" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBHY}\""
+SUBWARP=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy-warp' LIMIT 1" 2>/dev/null)
+[[ -n "$SUBHY" && -n "$SUBWARP" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBWARP}\""
 [[ -n "$HOME_TOKEN" ]] && GW_CMD="${GW_CMD} --pipe ${HOME_TOKEN}"
 MON_NOTE=""
 [[ "$MON_OK" == "1" ]] && MON_NOTE=" В панели мониторинга VPS сервер появится сам при следующем замере."

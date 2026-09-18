@@ -30,6 +30,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 | `SUB_PORT` | `2096` | порт подписок |
 | `PORT_REALITY` / `PORT_XHTTP` | `443` / `8080` | порты подключений |
 | `DO_HY2` / `PORT_HY2` | `1` / `34443` | подключение Hysteria 2 (UDP). Клиенты — `<имя>-hy`; у `Keenetic-hy` своя подписка, остальным Hysteria добавляется в их общую |
+| (при `DO_WARP=1` и `DO_HY2=1`) | всегда | запасной вход шлюза `Keenetic-hy-warp`: Hysteria, выход через Cloudflare WARP, своя подписка. Нужен, если адрес сервера Google считает российским; заводится при любой установке |
 | `DO_MONITOR` | `1` | подключить сервер к домашней панели мониторинга VPS (см. ниже) |
 | `MONITOR_KEY` | ключ домашнего шлюза | открытый ключ, которому разрешён запуск проверочного скрипта |
 | `FORCE` | `0` | `1` — работать даже на непустом сервере |
@@ -53,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/vps-h
 В конце установки скрипт печатает **одну строку** вида
 
 ```bash
-sudo add-vps GB-113 "https://IP:2096/clash/<id>" "https://IP:2096/clash/<id-hysteria>"
+sudo add-vps GB-113 "https://IP:2096/clash/<id>" "https://IP:2096/clash/<id-hysteria>" "https://IP:2096/clash/<id-warp>"
 ```
 
 Её нужно выполнить **на шлюзе**. Команда сама допишет подписки в `/etc/mihomo/config.yaml`,

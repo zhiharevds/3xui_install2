@@ -3,7 +3,7 @@
 # Живёт на шлюзе: /usr/local/bin/add-vps. Готовую строку запуска печатает установщик сервера
 # 3xui_install3.sh в конце своей работы.
 #
-#   sudo add-vps GB-113 https://IP:2096/clash/<id> [https://IP:2096/clash/<id-hysteria>]
+#   sudo add-vps GB-113 https://IP:2096/clash/<id> [https://IP:2096/clash/<id-hysteria> [https://IP:2096/clash/<id-warp>]]
 #   sudo add-vps GB-113 … --pipe <строка>   то же + вход «телефон вне дома → дом» через этот сервер
 #   sudo add-vps GB-113 --pipe <строка>     только вход домой (сервер в шлюзе уже есть)
 #   sudo add-vps --remove GB-113
@@ -163,6 +163,7 @@ def main():
     ap.add_argument("name", nargs="?", help="имя сервера, как напечатал установщик (например GB-113)")
     ap.add_argument("url", nargs="?", help="ссылка подписки формата mihomo (/clash/...)")
     ap.add_argument("hy_url", nargs="?", help="ссылка подписки Hysteria (/clash/...), если есть")
+    ap.add_argument("warp_url", nargs="?", help="ссылка подписки запасного входа «через WARP» (/clash/...), если есть")
     ap.add_argument("--pipe", help="строка от установщика: вход «телефон вне дома → дом» через этот сервер")
     ap.add_argument("--remove", action="store_true", help="убрать сервер из шлюза")
     ap.add_argument("--reload", action="store_true", help="только перечитать конфиг")
@@ -180,7 +181,7 @@ def main():
     pid = re.sub(r"[^a-z0-9-]+", "-", a.name.lower()).strip("-")
     if not pid:
         die("пустое имя")
-    pids = [pid, pid + "-hy2"]
+    pids = [pid, pid + "-hy2", pid + "-hy2-warp"]
     old = open(a.config, encoding="utf-8").read()
 
     tok = pipe_token(a.pipe) if a.pipe else None
@@ -198,7 +199,7 @@ def main():
     else:
         if not a.url:
             die("не указана ссылка подписки")
-        for u in (a.url, a.hy_url):
+        for u in (a.url, a.hy_url, a.warp_url):
             if u and "/clash/" not in u:
                 die(f"ссылка {u} не формата mihomo (в ней должно быть /clash/) — возьми ту, что напечатал установщик")
         if has_provider(old, pid):
@@ -208,6 +209,9 @@ def main():
         if a.hy_url:
             blocks += provider_block(pid + "-hy2", a.hy_url, f"{a.name}: Hysteria 2 (отдельная подписка — панель мониторинга меряет один узел на подписку)")
             added.append(pid + "-hy2")
+        if a.warp_url:
+            blocks += provider_block(pid + "-hy2-warp", a.warp_url, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским")
+            added.append(pid + "-hy2-warp")
         _, b = providers_section(old)
         new = old[:b] + blocks + old[b:]
         new = edit_use(new, LIST_GROUP, add=added)
