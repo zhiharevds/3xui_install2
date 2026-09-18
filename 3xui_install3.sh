@@ -321,30 +321,45 @@ if [[ "$DO_WARP" == "1" ]]; then
 	[[ "$WARP_OK" == "1" ]] && ok "WARP подключён (SOCKS на 127.0.0.1:40000)" \
 	                        || bad "WARP не поднялся — проверить: warp-cli status"
 	# Страна выхода WARP глазами Google. Cloudflare выдаёт выходной адрес случайно, и часть таких
-	# адресов Google считает российскими (на HIP-NL 2026-09-18 — с первой же регистрации). Тогда
-	# запасной вход «через WARP» бесполезен: перерегистрируемся, пока Google не увидит другую страну.
-	warp_region() {
+	# адресов Google считает российскими (на HIP-NL 2026-09-18 — с первой же регистрации). С таким
+	# адресом запасной вход «через WARP» бесполезен. Поэтому на сервере живёт сторож warp-region-fix:
+	# раз в 10 минут меряет страну и, пока она RU, перерегистрирует WARP — сколько бы раз ни пришлось.
+	# Он же поймает случай, когда Cloudflare сменит адрес позже. Страну узнать не удалось — ничего не трогает.
+	cat > /usr/local/bin/warp-region-fix <<'WRF'
+#!/bin/bash
+	# Сторож страны WARP: пока Google считает выход WARP российским — перерегистрировать WARP.
+	# Запуск: cron раз в 10 минут (/etc/cron.d/warp-region-fix). Журнал: /var/log/warp-region.log
+	# Руками: warp-region-fix (одна проверка), warp-region-fix --show (только показать страну).
+	exec 9>/run/warp-region-fix.lock; flock -n 9 || exit 0
+	region() {
 		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
 			'https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid' \
 			| grep -o 'name="region" value="[A-Z]*"' | head -1 | grep -o '[A-Z][A-Z]"' | tr -d '"'
 	}
+	R=$(region)
+	[[ "$1" == "--show" ]] && { echo "${R:-?}"; exit 0; }
+	[[ "$R" != "RU" ]] && exit 0          # нормальная страна или не удалось узнать — не трогаем
+	warp-cli --accept-tos disconnect          >/dev/null 2>&1
+	warp-cli --accept-tos registration delete >/dev/null 2>&1
+	warp-cli --accept-tos registration new    >/dev/null 2>&1
+	warp-cli --accept-tos mode proxy          >/dev/null 2>&1
+	warp-cli --accept-tos connect             >/dev/null 2>&1
+	for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2; done
+	sleep 2; N=$(region)
+	echo "$(date '+%F %T') Google видел выход WARP как RU — перерегистрация, теперь: ${N:-?}" >> /var/log/warp-region.log
+	[[ "$N" != "RU" && -n "$N" ]]
+WRF
+	chmod 755 /usr/local/bin/warp-region-fix
+	echo '*/10 * * * * root /usr/local/bin/warp-region-fix >/dev/null 2>&1' > /etc/cron.d/warp-region-fix
 	if [[ "$WARP_OK" == "1" ]]; then
-		WREG=$(warp_region)
-		for _try in 1 2 3 4 5; do
-			[[ "$WREG" != "RU" ]] && break
-			warp-cli --accept-tos disconnect          >/dev/null 2>&1
-			warp-cli --accept-tos registration delete >/dev/null 2>&1
-			warp-cli --accept-tos registration new    >/dev/null 2>&1
-			warp-cli --accept-tos mode proxy          >/dev/null 2>&1
-			warp-cli --accept-tos connect             >/dev/null 2>&1
-			for _ in $(seq 1 20); do
-				warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2
-			done
-			sleep 2; WREG=$(warp_region)
+		for _try in 1 2 3 4 5; do          # сразу несколько попыток, чтобы не ждать сторожа
+			[[ "$(warp-region-fix --show)" != "RU" ]] && break
+			warp-region-fix
 		done
-		if   [[ "$WREG" == "RU" ]]; then bad "Google считает выход WARP российским даже после 5 перерегистраций — повторить позже: warp-cli registration delete; warp-cli registration new"
-		elif [[ -n "$WREG" ]];      then ok "для Google выход WARP — страна ${WREG}"
-		else                             echo "  страну выхода WARP узнать не удалось (не критично)"; fi
+		WREG=$(warp-region-fix --show)
+		if   [[ "$WREG" == "RU" ]]; then echo "  Google пока считает выход WARP российским — сторож warp-region-fix будет перерегистрировать раз в 10 минут, пока не выдадут нормальный адрес (журнал: /var/log/warp-region.log)"
+		elif [[ "$WREG" != "?" ]];  then ok "для Google выход WARP — страна ${WREG}; за этим следит сторож warp-region-fix"
+		else                           echo "  страну выхода WARP узнать не удалось — сторож warp-region-fix проверит сам"; fi
 	fi
 fi
 
