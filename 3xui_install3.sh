@@ -320,6 +320,32 @@ if [[ "$DO_WARP" == "1" ]]; then
 	done
 	[[ "$WARP_OK" == "1" ]] && ok "WARP подключён (SOCKS на 127.0.0.1:40000)" \
 	                        || bad "WARP не поднялся — проверить: warp-cli status"
+	# Страна выхода WARP глазами Google. Cloudflare выдаёт выходной адрес случайно, и часть таких
+	# адресов Google считает российскими (на HIP-NL 2026-09-18 — с первой же регистрации). Тогда
+	# запасной вход «через WARP» бесполезен: перерегистрируемся, пока Google не увидит другую страну.
+	warp_region() {
+		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
+			'https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid' \
+			| grep -o 'name="region" value="[A-Z]*"' | head -1 | grep -o '[A-Z][A-Z]"' | tr -d '"'
+	}
+	if [[ "$WARP_OK" == "1" ]]; then
+		WREG=$(warp_region)
+		for _try in 1 2 3 4 5; do
+			[[ "$WREG" != "RU" ]] && break
+			warp-cli --accept-tos disconnect          >/dev/null 2>&1
+			warp-cli --accept-tos registration delete >/dev/null 2>&1
+			warp-cli --accept-tos registration new    >/dev/null 2>&1
+			warp-cli --accept-tos mode proxy          >/dev/null 2>&1
+			warp-cli --accept-tos connect             >/dev/null 2>&1
+			for _ in $(seq 1 20); do
+				warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2
+			done
+			sleep 2; WREG=$(warp_region)
+		done
+		if   [[ "$WREG" == "RU" ]]; then bad "Google считает выход WARP российским даже после 5 перерегистраций — повторить позже: warp-cli registration delete; warp-cli registration new"
+		elif [[ -n "$WREG" ]];      then ok "для Google выход WARP — страна ${WREG}"
+		else                             echo "  страну выхода WARP узнать не удалось (не критично)"; fi
+	fi
 fi
 
 x-ui restart >/dev/null 2>&1

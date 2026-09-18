@@ -134,6 +134,20 @@ def direct_rule(s, ip, name, add=True):
     return s
 
 
+def forget_host_key(ip):
+    """Сервер переустановили — у него новый отпечаток SSH, а панель мониторинга помнит старый и
+    перестаёт на него заходить («Host key has changed»). Добавляем сервер заново → старый отпечаток забыть."""
+    kh = "/opt/vpsdash/data/known_hosts"
+    if ip and os.path.isfile(kh):
+        st = os.stat(kh)
+        subprocess.run(["ssh-keygen", "-f", kh, "-R", ip], capture_output=True)
+        os.chown(kh, st.st_uid, st.st_gid)
+        try:
+            os.remove(kh + ".old")
+        except OSError:
+            pass
+
+
 def game_running():
     try:
         cs = json.load(urllib.request.urlopen(API + "/connections", timeout=10)).get("connections") or []
@@ -231,6 +245,9 @@ def main():
     if tok and not a.remove:
         pipe_edit(a.name, pid, tok)
 
+    if not a.remove:
+        m = re.search(r"//([0-9.]+):", a.url or "")
+        forget_host_key(tok["h"] if tok else (m.group(1) if m else ""))
     if a.remove:  # скачанные файлы подписок убранного сервера больше не нужны
         for p_ in pids:
             try:
