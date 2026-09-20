@@ -212,6 +212,18 @@ if [[ ! -f "$CERT" || ! -f "$KEY" ]]; then
 	chmod 600 "$KEY" 2>/dev/null; chmod 644 "$CERT" 2>/dev/null
 fi
 
+# Обновление сертификата перезапускает x-ui — туннель мигает на секунду. acme.sh по умолчанию
+# проверяет 4 раза в сутки в случайные часы (у нас выпало на 23:15 дома — выкинуло из игры).
+# Оставляем одну проверку в сутки в час, когда дома спят: 23 UTC = 04 утра Екатеринбурга.
+# Запас есть: сертификат живёт 160 часов, продление наступает на середине срока.
+RENEW_HOUR_UTC="${RENEW_HOUR_UTC:-23}"
+if crontab -l 2>/dev/null | grep -q 'acme.sh --cron'; then
+	# cron считает по часам сервера — переводим (обычно сервер и так в UTC)
+	RENEW_HOUR_LOCAL=$(date -d "${RENEW_HOUR_UTC}:00 UTC" +%-H 2>/dev/null || echo "$RENEW_HOUR_UTC")
+	crontab -l | sed -E "/acme\.sh --cron/ s/^([0-9]+) [0-9,*]+ /\1 ${RENEW_HOUR_LOCAL} /" | crontab -
+	ok "проверка сертификата — раз в сутки в ${RENEW_HOUR_UTC}:xx UTC"
+fi
+
 if [[ -f "$CERT" && -f "$KEY" ]]; then
 	ok "сертификат действует до: $(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)"
 	/usr/local/x-ui/x-ui cert -webCert "$CERT" -webCertKey "$KEY" >/dev/null 2>&1
