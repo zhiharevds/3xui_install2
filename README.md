@@ -31,7 +31,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 | `PORT_REALITY` / `PORT_XHTTP` | `443` / `8080` | порты подключений |
 | `DO_HY2` / `PORT_HY2` | `1` / `34443` | подключение Hysteria 2 (UDP). Клиенты — `<имя>-hy`; у `Keenetic-hy` своя подписка, остальным Hysteria добавляется в их общую |
 | (при `DO_WARP=1` и `DO_HY2=1`) | всегда | запасной вход шлюза `Keenetic-hy-warp`: Hysteria, выход через Cloudflare WARP, своя подписка. Нужен, если адрес сервера Google считает российским; заводится при любой установке |
-| (при `DO_WARP=1`) | всегда | сторож `warp-region-fix` (cron, раз в 10 минут): пока Google считает выход WARP российским, перерегистрирует WARP — сколько бы раз ни пришлось. Журнал `/var/log/warp-region.log`; посмотреть страну: `warp-region-fix --show` |
+| (при `DO_WARP=1`) | всегда | сторож `warp-region-fix` (cron, раз в 10 минут): пока аккаунт Google или YouTube считает выход WARP российским, перерегистрирует WARP — сколько бы раз ни пришлось (у них разные базы: бывает аккаунт NL, а YouTube RU). Журнал `/var/log/warp-region.log`; посмотреть страну: `warp-region-fix --show` → «аккаунт/YouTube», например `NL/NL` |
 | `DO_MONITOR` | `1` | подключить сервер к домашней панели мониторинга VPS (см. ниже) |
 | `MONITOR_KEY` | ключ домашнего шлюза | открытый ключ, которому разрешён запуск проверочного скрипта |
 | `FORCE` | `0` | `1` — работать даже на непустом сервере |
