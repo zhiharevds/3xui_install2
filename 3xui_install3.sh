@@ -341,18 +341,25 @@ if [[ "$DO_WARP" == "1" ]]; then
 	# Он же поймает случай, когда Cloudflare сменит адрес позже. Страну узнать не удалось — ничего не трогает.
 	cat > /usr/local/bin/warp-region-fix <<'WRF'
 #!/bin/bash
-	# Сторож страны WARP: пока Google считает выход WARP российским — перерегистрировать WARP.
+	# Сторож страны WARP: пока Google ИЛИ YouTube считает выход WARP российским — перерегистрировать WARP.
+	# Базы у них разные: на HIP-NL 2026-09-24 аккаунт видел NL, а YouTube — RU; поэтому смотрим обе.
 	# Запуск: cron раз в 10 минут (/etc/cron.d/warp-region-fix). Журнал: /var/log/warp-region.log
-	# Руками: warp-region-fix (одна проверка), warp-region-fix --show (только показать страну).
+	# Руками: warp-region-fix (одна проверка), warp-region-fix --show (показать «аккаунт/YouTube», напр. NL/RU).
 	exec 9>/run/warp-region-fix.lock; flock -n 9 || exit 0
-	region() {
-		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' \
+	UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+	acc() {
+		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A "$UA" \
 			'https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid' \
 			| grep -o 'name="region" value="[A-Z]*"' | head -1 | grep -o '[A-Z][A-Z]"' | tr -d '"'
 	}
+	yt() {  # регион YouTube из sw.js_data (в начале защитная приставка )]}' — JSON с первой скобки)
+		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A "$UA" 'https://www.youtube.com/sw.js_data' \
+			| python3 -c 'import sys,json,re;r=sys.stdin.read();v=json.loads(r[r.index("["):])[0][2][0][0][1];print(v if re.fullmatch("[A-Z]{2}",v) else "")' 2>/dev/null
+	}
+	region() { local a y; a=$(acc); y=$(yt); echo "${a:-?}/${y:-?}"; }
 	R=$(region)
-	[[ "$1" == "--show" ]] && { echo "${R:-?}"; exit 0; }
-	[[ "$R" != "RU" ]] && exit 0          # нормальная страна или не удалось узнать — не трогаем
+	[[ "$1" == "--show" ]] && { echo "$R"; exit 0; }
+	[[ "$R" != *RU* ]] && exit 0          # нигде не Россия или не удалось узнать — не трогаем
 	warp-cli --accept-tos disconnect          >/dev/null 2>&1
 	warp-cli --accept-tos registration delete >/dev/null 2>&1
 	warp-cli --accept-tos registration new    >/dev/null 2>&1
@@ -360,19 +367,19 @@ if [[ "$DO_WARP" == "1" ]]; then
 	warp-cli --accept-tos connect             >/dev/null 2>&1
 	for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2; done
 	sleep 2; N=$(region)
-	echo "$(date '+%F %T') Google видел выход WARP как RU — перерегистрация, теперь: ${N:-?}" >> /var/log/warp-region.log
-	[[ "$N" != "RU" && -n "$N" ]]
+	echo "$(date '+%F %T') аккаунт/YouTube было ${R} — перерегистрация, теперь: ${N}" >> /var/log/warp-region.log
+	[[ "$N" != *RU* ]]
 WRF
 	chmod 755 /usr/local/bin/warp-region-fix
 	echo '*/10 * * * * root /usr/local/bin/warp-region-fix >/dev/null 2>&1' > /etc/cron.d/warp-region-fix
 	if [[ "$WARP_OK" == "1" ]]; then
 		for _try in 1 2 3 4 5; do          # сразу несколько попыток, чтобы не ждать сторожа
-			[[ "$(warp-region-fix --show)" != "RU" ]] && break
+			[[ "$(warp-region-fix --show)" != *RU* ]] && break
 			warp-region-fix
 		done
 		WREG=$(warp-region-fix --show)
-		if   [[ "$WREG" == "RU" ]]; then echo "  Google пока считает выход WARP российским — сторож warp-region-fix будет перерегистрировать раз в 10 минут, пока не выдадут нормальный адрес (журнал: /var/log/warp-region.log)"
-		elif [[ "$WREG" != "?" ]];  then ok "для Google выход WARP — страна ${WREG}; за этим следит сторож warp-region-fix"
+		if   [[ "$WREG" == *RU* ]]; then echo "  Google пока считает выход WARP российским — сторож warp-region-fix будет перерегистрировать раз в 10 минут, пока не выдадут нормальный адрес (журнал: /var/log/warp-region.log)"
+		elif [[ "$WREG" != "?/?" ]]; then ok "для Google выход WARP — страна ${WREG}; за этим следит сторож warp-region-fix"
 		else                           echo "  страну выхода WARP узнать не удалось — сторож warp-region-fix проверит сам"; fi
 	fi
 fi
