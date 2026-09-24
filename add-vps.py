@@ -155,7 +155,7 @@ def game_running():
         return False
     for c in cs:
         host = (c["metadata"].get("host") or c["metadata"].get("sniffHost") or "")
-        if c["chains"][-1] == "Игра" or "nexon" in host:
+        if c["chains"][-1] in ("The First Descendant", "Игра") or "nexon" in host:  # «Игра» — старое имя тумблера (до Р-112)
             return True
     return False
 
