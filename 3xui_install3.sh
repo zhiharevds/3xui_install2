@@ -258,7 +258,9 @@ fi
 if [[ -f "$CERT" && -f "$KEY" ]]; then
 	ok "сертификат действует до: $(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)"
 	/usr/local/x-ui/x-ui cert -webCert "$CERT" -webCertKey "$KEY" >/dev/null 2>&1
-	ok "прописан панели"
+	# проверяем записью в базе, а не верим на слово: база работающей панели бывает занята (см. шаг 4)
+	[[ "$(sqlite3 -cmd ".timeout 15000" /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='webCertFile' LIMIT 1")" == "$CERT" ]] \
+		&& ok "прописан панели" || bad "сертификат не прописался панели — x-ui → пункт 20 → 6"
 	PANEL_SCHEME=https
 else
 	bad "сертификат так и не выпустился — панель останется на обычном HTTP"
@@ -274,9 +276,17 @@ ufw allow ${PANEL_PORT}/tcp >/dev/null 2>&1
 ###############################################################################
 step "Подписки"
 DB=/etc/x-ui/x-ui.db
+# 🔴 Работающая панель (3.8.5) почти всё время держит базу занятой: запись снаружи получает
+# «database is locked» и молча пропадает (HIP-USA 2026-09-25: не записались subEnable, subPort,
+# subClashEnable — подписки отвечали 404, а скрипт писал «✓»). Поэтому базу правим при
+# ОСТАНОВЛЕННОЙ панели (запускаем после шаблона маршрутизации, шаг 5) и каждую запись проверяем.
+systemctl stop x-ui
+db() { sqlite3 -cmd ".timeout 15000" "$DB" "$@"; }
+DB_BAD=0
 set_opt() {
-	sqlite3 "$DB" "INSERT INTO settings(key,value) SELECT '$1','' WHERE NOT EXISTS(SELECT 1 FROM settings WHERE key='$1');
-	               UPDATE settings SET value='$2' WHERE key='$1';"
+	db "INSERT INTO settings(key,value) SELECT '$1','' WHERE NOT EXISTS(SELECT 1 FROM settings WHERE key='$1');
+	    UPDATE settings SET value='$2' WHERE key='$1';"
+	[[ "$(db "SELECT value FROM settings WHERE key='$1' LIMIT 1")" == "$2" ]] || { bad "не записалась настройка панели $1"; DB_BAD=1; }
 }
 set_opt subEnable true
 set_opt subPort "${SUB_PORT}"
@@ -290,7 +300,7 @@ set_opt subKeyFile "$KEY"
 # Путь задаём явно: по умолчанию панель придумывает случайный.
 set_opt subClashEnable true
 set_opt subClashPath /clash/
-ok "подписки на порту ${SUB_PORT}, по защищённому соединению (+ формат mihomo: /clash/)"
+[[ "$DB_BAD" == "0" ]] && ok "подписки на порту ${SUB_PORT}, по защищённому соединению (+ формат mihomo: /clash/)"
 
 ###############################################################################
 # 5. Шаблон маршрутизации Xray
@@ -336,9 +346,14 @@ if sys.argv[2] == "1":
     tpl["routing"]["rules"].insert(3, {"type":"field","user":["Keenetic-hy-warp"],"network":"tcp","outboundTag":"warp-cli"})
 print(json.dumps(tpl, ensure_ascii=False, indent=2))
 PY
-sqlite3 "$DB" "DELETE FROM settings WHERE key='xrayTemplateConfig';
-               INSERT INTO settings(key,value) VALUES('xrayTemplateConfig', readfile('/tmp/xtpl.json'));"
-ok "выход по умолчанию: ${DEFAULT_EXIT}; российское — напрямую; торренты — в отказ"
+db "DELETE FROM settings WHERE key='xrayTemplateConfig';
+    INSERT INTO settings(key,value) VALUES('xrayTemplateConfig', readfile('/tmp/xtpl.json'));"
+if [[ "$(db "SELECT value FROM settings WHERE key='xrayTemplateConfig' LIMIT 1")" == "$(cat /tmp/xtpl.json)" ]]; then
+	ok "выход по умолчанию: ${DEFAULT_EXIT}; российское — напрямую; торренты — в отказ"
+else
+	bad "шаблон маршрутизации не записался в панель"
+fi
+systemctl start x-ui                 # остановлена на шаге 4 — ради записи в базу
 
 ###############################################################################
 # 6. Cloudflare WARP — ставится всегда, ВКЛЮЧАЕТСЯ только там, где нужен (Р-116)
@@ -674,10 +689,17 @@ done
 if [[ "$CREATE_INBOUNDS" == "1" ]]; then
 	CLASH_ID=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic' LIMIT 1" 2>/dev/null)
 	if [[ -n "$CLASH_ID" ]]; then
+		for sp in sub clash; do       # отвечают ли подписки по тем адресам, что напечатаны ниже
+			code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "https://127.0.0.1:${SUB_PORT}/${sp}/${CLASH_ID}")
+			[[ "$code" == "200" ]] && ok "подписка /${sp}/ отвечает" \
+				|| bad "подписка /${sp}/ не отвечает (HTTP ${code}) — ссылки ниже работать не будут"
+		done
 		CLASH_BODY=$(curl -sk --max-time 10 "https://127.0.0.1:${SUB_PORT}/clash/${CLASH_ID}")
-		grep -q "support-x25519mlkem768: true" <<< "$CLASH_BODY" \
-			&& ok "подписка для шлюза (формат mihomo) отдаёт пост-квантовый флаг — поправки на шлюзе не нужны" \
-			|| bad "подписка формата mihomo без пост-квантового флага (панель старше 3.8?) — шлюзу понадобится override-expr"
+		if grep -q "support-x25519mlkem768: true" <<< "$CLASH_BODY"; then
+			ok "подписка для шлюза (формат mihomo) отдаёт пост-квантовый флаг — поправки на шлюзе не нужны"
+		elif grep -q "proxies:" <<< "$CLASH_BODY"; then
+			bad "подписка формата mihomo без пост-квантового флага (панель старше 3.8?) — шлюзу понадобится override-expr"
+		fi
 	fi
 fi
 grep -q "restart x-ui" <<< "$HOOK" \
