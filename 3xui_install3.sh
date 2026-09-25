@@ -30,7 +30,8 @@ bad()  { echo -e "  ${red}✗${plain} $*"; }
 # НАСТРОЙКИ — можно переопределить переменными окружения перед запуском
 ###############################################################################
 SUB_PORT=${SUB_PORT:-2096}            # порт подписок
-PORT_REALITY=${PORT_REALITY:-443}     # подключение REALITY (tcp+vision)
+PORT_REALITY=${PORT_REALITY:-8443}    # подключение REALITY (tcp+vision). НЕ 443: его держим свободным под
+                                      #   синхронизацию папок — 443 пускает почти любой прокси (Р-121)
 PORT_XHTTP=${PORT_XHTTP:-8080}        # подключение XHTTP  (его ТСПУ не душит)
 PORT_HY2=${PORT_HY2:-34443}           # подключение Hysteria 2 (UDP)
 DO_HY2=${DO_HY2:-1}                   # 1 = создать подключение Hysteria 2
@@ -487,7 +488,7 @@ x-ui restart >/dev/null 2>&1
 sleep 5
 
 ###############################################################################
-# 7. Подключения REALITY (443), XHTTP (8080) и Hysteria 2 (34443/udp) через API панели
+# 7. Подключения REALITY (8443), XHTTP (8080) и Hysteria 2 (34443/udp) через API панели
 ###############################################################################
 if [[ "$CREATE_INBOUNDS" == "1" ]]; then
 	step "Создание подключений"
@@ -545,7 +546,7 @@ def add(remark, port, settings, stream, protocol="vless", sniffing=sniff):
     good = '"success":true' in r
     print("  %s: %s" % (remark, "создано" if good else "ОШИБКА " + r[:120]))
 
-# --- REALITY на 443 (tcp + vision) ---
+# --- REALITY на 8443 (tcp + vision); 443 не занимаем — он под синхронизацию папок ---
 pv, pb = keypair(); sid = secrets.token_hex(8)
 add(SRV + "-REALITY", os.environ["PORT_REALITY"],
     json.dumps({"clients": [client(n, "xtls-rprx-vision") for n in names], "decryption": "none"}),
@@ -679,6 +680,10 @@ journalctl -u x-ui --no-pager 2>/dev/null | grep "Web server running" | tail -1 
 for p in "${PANEL_PORT}" "${SUB_PORT}" "${PORT_REALITY}" "${PORT_XHTTP}"; do
 	ss -tln | grep -q ":${p} " && ok "порт ${p} слушает" || bad "порт ${p} НЕ слушает"
 done
+# 443 держим свободным под синхронизацию папок (Р-121) — если сам не отдал его подключению
+if [[ "$PORT_REALITY" != "443" && "$PORT_XHTTP" != "443" ]]; then
+	ss -tln | grep -q ":443 " && bad "порт 443 занят, а он нужен свободным под синхронизацию папок" || ok "порт 443 свободен (под синхронизацию папок)"
+fi
 if [[ "$DO_HY2" == "1" && "$CREATE_INBOUNDS" == "1" ]]; then
 	ss -uln | grep -q ":${PORT_HY2} " && ok "порт ${PORT_HY2}/udp слушает (Hysteria)" || bad "порт ${PORT_HY2}/udp НЕ слушает (Hysteria)"
 fi
