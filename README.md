@@ -24,6 +24,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 | `DISABLE_PING` | `0` | `1` — не отвечать на пинг. По умолчанию отвечает: так проще диагностировать, а скрытности почти не добавляет. На выбор сервера в mihomo не влияет |
 | `DO_WARP` | `1` | ставить ли Cloudflare WARP |
 | `DO_UPGRADE` | `1` | обновлять ли систему перед установкой |
+| `DO_SWAP` / `SWAP_MB` | `1` / `1024` | завести файл подкачки `/swapfile` (если свапа ещё нет и на диске хватает места), `swappiness 10`. Страховка: без свапа при нехватке памяти система убивает Xray и туннель рвётся |
 | `CREATE_INBOUNDS` | `1` | создавать ли подключения автоматически |
 | `CLIENTS` | `Keenetic dzh` | список клиентов: шлюз и один для проверок. Устройства родных ходят домой через обратный туннель, отдельные клиенты им не нужны |
 | `SERVER_NAME` | страна + конец адреса, напр. `GB-113` | имя сервера: так называются его узлы в панели шлюза и сервер в панели мониторинга |
@@ -35,6 +36,13 @@ bash <(curl -Ls https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 | `DO_MONITOR` | `1` | подключить сервер к домашней панели мониторинга VPS (см. ниже) |
 | `MONITOR_KEY` | ключ домашнего шлюза | открытый ключ, которому разрешён запуск проверочного скрипта |
 | `FORCE` | `0` | `1` — работать даже на непустом сервере |
+
+Свап на уже работающем сервере (установщик туда не запустить) — ничего не перезапускает:
+
+```bash
+swapon --show | grep -q . || { fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab; }
+echo 'vm.swappiness = 10' > /etc/sysctl.d/60-swap.conf && sysctl -p /etc/sysctl.d/60-swap.conf && free -m
+```
 
 ## Панель мониторинга VPS — `vps-health.py`
 
