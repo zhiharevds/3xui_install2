@@ -10,7 +10,7 @@
 #   автопродление с перезапуском панели, fail2ban.
 # Что дописываем мы (в официальных средствах этого нет):
 #   свап, отключение IPv6 и пинга, файрвол, шаблон маршрутизации, подписка по TLS,
-#   WARP, подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0,
+#   WARP (включаем, только если Google видит адрес российским), подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0,
 #   подключение Hysteria 2 (2026-09-17: из дома стабильно быстро работает именно оно),
 #   подключение сервера к домашней панели мониторинга VPS,
 #   вход «телефон вне дома → домашний шлюз» (обратный туннель, входы HOME-* в панели; home-pipe.py).
@@ -35,9 +35,9 @@ PORT_XHTTP=${PORT_XHTTP:-8080}        # подключение XHTTP  (его Т
 PORT_HY2=${PORT_HY2:-34443}           # подключение Hysteria 2 (UDP)
 DO_HY2=${DO_HY2:-1}                   # 1 = создать подключение Hysteria 2
 DO_UPGRADE=${DO_UPGRADE:-1}           # 1 = обновить систему перед установкой
-DO_WARP=${DO_WARP:-1}                 # 1 = поставить Cloudflare WARP
+DO_WARP=${DO_WARP:-1}                 # 1 = поставить Cloudflare WARP (включится, только если нужен — шаг 6)
 DO_SWAP=${DO_SWAP:-1}                 # 1 = завести файл подкачки (свап), если его ещё нет
-SWAP_MB=${SWAP_MB:-1024}              #   его размер, МБ
+SWAP_MB=${SWAP_MB:-}                  #   его размер, МБ; пусто = как памяти (округлить до ГБ), от 1 до 4 ГБ
 CREATE_INBOUNDS=${CREATE_INBOUNDS:-1} # 1 = создать подключения автоматически
 # Keenetic — домашний шлюз, dzh — для проверок. Родным отдельные клиенты не нужны: их устройства
 # ходят домой через обратный туннель (страница «Подключение устройств» в панели мониторинга).
@@ -130,12 +130,17 @@ sysctl -p >/dev/null 2>&1
 # Настройки применяются ещё раз ПОСЛЕ файрвола — см. раздел ниже, ufw их перебивает.
 ok "записано в /etc/sysctl.conf (применим окончательно после файрвола)"
 
-# Свап (Р-115). У серверов по 1 ГБ памяти, а WARP со временем разрастается до 300–400 МБ.
+# Свап (Р-115, размер — Р-116). У серверов по 1 ГБ памяти, а WARP разрастается до 300–400 МБ.
 # Без свапа при нехватке памяти система убивает Xray — туннель рвётся (FORNEX-RU, 2026-09-19).
 # Свап — страховка, а не прибавка памяти: swappiness 10 = выгружать на диск, только когда
 # память почти кончилась, иначе сервер тормозил бы на ровном месте.
 if [[ "$DO_SWAP" == "1" ]]; then
 	step "Свап"
+	if [[ -z "$SWAP_MB" ]]; then       # размер = объём памяти, округлённый до целых ГБ; от 1 до 4 ГБ
+		SWAP_MB=$(( ( $(awk '/^MemTotal/{print int($2/1024)}' /proc/meminfo) + 1023 ) / 1024 * 1024 ))
+		(( SWAP_MB < 1024 )) && SWAP_MB=1024
+		(( SWAP_MB > 4096 )) && SWAP_MB=4096
+	fi
 	if [[ -n "$(swapon --show --noheadings 2>/dev/null)" ]]; then
 		ok "свап уже есть: $(swapon --show --noheadings | awk '{print $1" "$3}' | paste -sd ',')"
 	elif (( $(df -Pm / | awk 'NR==2{print $4}') < SWAP_MB + 2048 )); then
@@ -336,8 +341,20 @@ sqlite3 "$DB" "DELETE FROM settings WHERE key='xrayTemplateConfig';
 ok "выход по умолчанию: ${DEFAULT_EXIT}; российское — напрямую; торренты — в отказ"
 
 ###############################################################################
-# 6. Cloudflare WARP (локальный SOCKS на 127.0.0.1:40000)
+# 6. Cloudflare WARP — ставится всегда, ВКЛЮЧАЕТСЯ только там, где нужен (Р-116)
 ###############################################################################
+# Зачем WARP: Google может считать адрес сервера российским (сеть записана на владельца из РФ или
+# Google «выучил» адрес по людям за ним), а через WARP видит страну, где сервер стоит.
+# Когда включаем:
+#   сервер в России                          — нет: Cloudflare даёт выход WARP в той же стране,
+#                                              для Google это всё равно Россия;
+#   Google и YouTube видят адрес нероссийским — нет: WARP только замедлит;
+#   хоть один из них видит Россию             — да, и сторож перерегистрирует WARP, пока выход
+#                                              не станет нероссийским.
+# Выключенный WARP стоит установленным и зарегистрированным: включить потом — одна команда warp-on
+# (она же подскажет строку для шлюза), выключить — warp-off.
+WARP_ON=0
+WARP_WHY=""
 if [[ "$DO_WARP" == "1" ]]; then
 	step "Cloudflare WARP"
 	curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor \
@@ -346,65 +363,102 @@ if [[ "$DO_WARP" == "1" ]]; then
 		> /etc/apt/sources.list.d/cloudflare-client.list
 	apt-get update -qq
 	apt-get -y -qq install cloudflare-warp >/dev/null 2>&1
+	for _ in $(seq 1 15); do warp-cli --accept-tos status >/dev/null 2>&1 && break; sleep 1; done
 	warp-cli --accept-tos registration new >/dev/null 2>&1
 	warp-cli --accept-tos mode proxy      >/dev/null 2>&1
-	warp-cli --accept-tos connect         >/dev/null 2>&1
-	# Подключение занимает больше пары секунд: ждём до 40, иначе получаем
-	# ложное «не поднялся» на самом деле рабочем WARP.
-	WARP_OK=0
-	for _ in $(seq 1 20); do
-		if warp-cli --accept-tos status 2>/dev/null | grep -qi connected; then WARP_OK=1; break; fi
-		sleep 2
-	done
-	[[ "$WARP_OK" == "1" ]] && ok "WARP подключён (SOCKS на 127.0.0.1:40000)" \
-	                        || bad "WARP не поднялся — проверить: warp-cli status"
-	# Страна выхода WARP глазами Google. Cloudflare выдаёт выходной адрес случайно, и часть таких
-	# адресов Google считает российскими (на HIP-NL 2026-09-18 — с первой же регистрации). С таким
-	# адресом запасной вход «через WARP» бесполезен. Поэтому на сервере живёт сторож warp-region-fix:
-	# раз в 10 минут меряет страну и, пока она RU, перерегистрирует WARP — сколько бы раз ни пришлось.
-	# Он же поймает случай, когда Cloudflare сменит адрес позже. Страну узнать не удалось — ничего не трогает.
+	# Сторож страны WARP. Cloudflare выдаёт выходной адрес случайно, и часть таких адресов Google
+	# считает российскими (на HIP-NL 2026-09-18 — с первой же регистрации). Раз в 10 минут меряет
+	# страну и, пока она RU, перерегистрирует WARP — сколько бы раз ни пришлось. Пока WARP выключен —
+	# молчит. Он же умеет померить сам адрес сервера (--direct): по этому замеру решаем, нужен ли WARP.
 	cat > /usr/local/bin/warp-region-fix <<'WRF'
 #!/bin/bash
-	# Сторож страны WARP: пока Google ИЛИ YouTube считает выход WARP российским — перерегистрировать WARP.
-	# Базы у них разные: на HIP-NL 2026-09-24 аккаунт видел NL, а YouTube — RU; поэтому смотрим обе.
-	# Запуск: cron раз в 10 минут (/etc/cron.d/warp-region-fix). Журнал: /var/log/warp-region.log
-	# Руками: warp-region-fix (одна проверка), warp-region-fix --show (показать «аккаунт/YouTube», напр. NL/RU).
-	exec 9>/run/warp-region-fix.lock; flock -n 9 || exit 0
-	UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
-	acc() {
-		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A "$UA" \
-			'https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid' \
-			| grep -o 'name="region" value="[A-Z]*"' | head -1 | grep -o '[A-Z][A-Z]"' | tr -d '"'
-	}
-	yt() {  # регион YouTube из sw.js_data (в начале защитная приставка )]}' — JSON с первой скобки)
-		curl -s --max-time 12 -x socks5h://127.0.0.1:40000 -A "$UA" 'https://www.youtube.com/sw.js_data' \
-			| python3 -c 'import sys,json,re;r=sys.stdin.read();v=json.loads(r[r.index("["):])[0][2][0][0][1];print(v if re.fullmatch("[A-Z]{2}",v) else "")' 2>/dev/null
-	}
-	region() { local a y; a=$(acc); y=$(yt); echo "${a:-?}/${y:-?}"; }
-	R=$(region)
-	[[ "$1" == "--show" ]] && { echo "$R"; exit 0; }
-	[[ "$R" != *RU* ]] && exit 0          # нигде не Россия или не удалось узнать — не трогаем
-	warp-cli --accept-tos disconnect          >/dev/null 2>&1
-	warp-cli --accept-tos registration delete >/dev/null 2>&1
-	warp-cli --accept-tos registration new    >/dev/null 2>&1
-	warp-cli --accept-tos mode proxy          >/dev/null 2>&1
-	warp-cli --accept-tos connect             >/dev/null 2>&1
-	for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2; done
-	sleep 2; N=$(region)
-	echo "$(date '+%F %T') аккаунт/YouTube было ${R} — перерегистрация, теперь: ${N}" >> /var/log/warp-region.log
-	[[ "$N" != *RU* ]]
+# Сторож страны WARP: пока Google ИЛИ YouTube считает выход WARP российским — перерегистрировать WARP.
+# Базы у них разные: на HIP-NL 2026-09-24 аккаунт видел NL, а YouTube — RU; поэтому смотрим обе.
+# Запуск: cron раз в 10 минут (/etc/cron.d/warp-region-fix). Журнал: /var/log/warp-region.log
+# Руками: warp-region-fix (одна проверка), --show (страна выхода WARP «аккаунт/YouTube», напр. NL/RU),
+#         --direct (то же для самого адреса сервера, без WARP).
+exec 9>/run/warp-region-fix.lock; flock -n 9 || exit 0
+UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+PX=(-x socks5h://127.0.0.1:40000)
+[[ "$1" == "--direct" ]] && PX=()
+acc() {
+	curl -s --max-time 12 "${PX[@]}" -A "$UA" \
+		'https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid' \
+		| grep -o 'name="region" value="[A-Z]*"' | head -1 | grep -o '[A-Z][A-Z]"' | tr -d '"'
+}
+yt() {  # регион YouTube из sw.js_data (в начале защитная приставка )]}' — JSON с первой скобки)
+	curl -s --max-time 12 "${PX[@]}" -A "$UA" 'https://www.youtube.com/sw.js_data' \
+		| python3 -c 'import sys,json,re;r=sys.stdin.read();v=json.loads(r[r.index("["):])[0][2][0][0][1];print(v if re.fullmatch("[A-Z]{2}",v) else "")' 2>/dev/null
+}
+region() { local a y; a=$(acc); y=$(yt); echo "${a:-?}/${y:-?}"; }
+[[ "$1" == "--direct" ]] && { region; exit 0; }
+if ! systemctl is-active -q warp-svc; then
+	[[ "$1" == "--show" ]] && echo "WARP выключен"
+	exit 0
+fi
+R=$(region)
+[[ "$1" == "--show" ]] && { echo "$R"; exit 0; }
+[[ "$R" != *RU* ]] && exit 0          # нигде не Россия или не удалось узнать — не трогаем
+warp-cli --accept-tos disconnect          >/dev/null 2>&1
+warp-cli --accept-tos registration delete >/dev/null 2>&1
+warp-cli --accept-tos registration new    >/dev/null 2>&1
+warp-cli --accept-tos mode proxy          >/dev/null 2>&1
+warp-cli --accept-tos connect             >/dev/null 2>&1
+for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2; done
+sleep 2; N=$(region)
+echo "$(date '+%F %T') аккаунт/YouTube было ${R} — перерегистрация, теперь: ${N}" >> /var/log/warp-region.log
+[[ "$N" != *RU* ]]
 WRF
-	chmod 755 /usr/local/bin/warp-region-fix
+	cat > /usr/local/bin/warp-on <<'WON'
+#!/bin/bash
+# warp-on — включить Cloudflare WARP на этом сервере: через него выходит вход Keenetic-hy-warp.
+# Нужен, когда Google считает адрес сервера российским (панель мониторинга VPS об этом сообщит).
+# Выключить обратно: warp-off.
+systemctl enable --now warp-svc >/dev/null 2>&1
+for _ in $(seq 1 15); do warp-cli --accept-tos status >/dev/null 2>&1 && break; sleep 1; done
+warp-cli --accept-tos mode proxy >/dev/null 2>&1
+warp-cli --accept-tos connect    >/dev/null 2>&1
+OK=0
+for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && { OK=1; break; }; sleep 2; done
+[[ "$OK" == "1" ]] || { echo "✗ WARP не подключился — проверить: warp-cli status"; exit 1; }
+for _ in 1 2 3 4 5; do          # сразу несколько попыток, чтобы не ждать сторожа
+	[[ "$(warp-region-fix --show)" != *RU* ]] && break
+	warp-region-fix
+done
+R=$(warp-region-fix --show)
+if   [[ "$R" == *RU* ]];  then echo "✓ WARP включён, но Google пока считает его выход российским (${R}) — сторож warp-region-fix будет перерегистрировать раз в 10 минут (журнал: /var/log/warp-region.log)"
+elif [[ "$R" == "?/?" ]]; then echo "✓ WARP включён; страну выхода узнать не удалось — сторож warp-region-fix проверит сам"
+else                          echo "✓ WARP включён; для Google его выход — ${R}"; fi
+if [[ -s /root/warp-gateway-line.txt && "$1" != "--quiet" ]]; then
+	echo
+	echo "Если WARP-узла этого сервера на домашнем шлюзе ещё нет — выполнить НА ШЛЮЗЕ:"
+	echo "   $(cat /root/warp-gateway-line.txt)"
+fi
+WON
+	cat > /usr/local/bin/warp-off <<'WOF'
+#!/bin/bash
+# warp-off — выключить Cloudflare WARP. Остаётся установленным и зарегистрированным: включить — warp-on.
+warp-cli --accept-tos disconnect >/dev/null 2>&1
+systemctl disable --now warp-svc >/dev/null 2>&1
+echo "✓ WARP выключен (включить обратно: warp-on). Вход Keenetic-hy-warp без него не работает."
+WOF
+	chmod 755 /usr/local/bin/warp-region-fix /usr/local/bin/warp-on /usr/local/bin/warp-off
 	echo '*/10 * * * * root /usr/local/bin/warp-region-fix >/dev/null 2>&1' > /etc/cron.d/warp-region-fix
-	if [[ "$WARP_OK" == "1" ]]; then
-		for _try in 1 2 3 4 5; do          # сразу несколько попыток, чтобы не ждать сторожа
-			[[ "$(warp-region-fix --show)" != *RU* ]] && break
-			warp-region-fix
-		done
-		WREG=$(warp-region-fix --show)
-		if   [[ "$WREG" == *RU* ]]; then echo "  Google пока считает выход WARP российским — сторож warp-region-fix будет перерегистрировать раз в 10 минут, пока не выдадут нормальный адрес (журнал: /var/log/warp-region.log)"
-		elif [[ "$WREG" != "?/?" ]]; then ok "для Google выход WARP — страна ${WREG}; за этим следит сторож warp-region-fix"
-		else                           echo "  страну выхода WARP узнать не удалось — сторож warp-region-fix проверит сам"; fi
+
+	HOST_CC=$(curl -s --max-time 8 "https://ipinfo.io/${MAIN_IP}/country" | tr -dc 'A-Za-z' | tr 'a-z' 'A-Z' | head -c 2)
+	DREG=$(warp-region-fix --direct)   # как Google и YouTube видят сам адрес сервера: «аккаунт/YouTube»
+	if   [[ "$DEFAULT_EXIT" == "warp" ]]; then WARP_ON=1; WARP_WHY="весь выход сервера идёт через WARP (DEFAULT_EXIT=warp)"
+	elif [[ "$HOST_CC" == "RU" ]];       then WARP_WHY="сервер в России — выход WARP был бы тоже российским"
+	elif [[ "$DREG" == *RU* ]];          then WARP_ON=1; WARP_WHY="Google/YouTube считают адрес сервера российским (${DREG})"
+	elif [[ "$DREG" == "?/?" ]];         then WARP_WHY="как Google видит адрес сервера, узнать не удалось — страну узла покажет панель мониторинга"
+	else                                      WARP_WHY="Google/YouTube и так видят страну сервера (${DREG})"; fi
+	if [[ "$WARP_ON" == "1" ]]; then
+		echo "  нужен: ${WARP_WHY}"
+		if warp-on --quiet | sed 's/^/  /'; then ok "за страной выхода WARP следит сторож warp-region-fix"
+		else bad "WARP не поднялся — проверить: warp-cli status; включить заново: warp-on"; fi
+	else
+		warp-off >/dev/null
+		ok "WARP установлен, но выключен: ${WARP_WHY}. Включить: warp-on"
 	fi
 fi
 
@@ -640,7 +694,18 @@ SUBHY=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy' LIMI
 GW_CMD="sudo add-vps ${SERVER_NAME} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUB1}\""
 [[ -n "$SUBHY" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBHY}\""
 SUBWARP=$(sqlite3 "$DB" "SELECT sub_id FROM clients WHERE email='Keenetic-hy-warp' LIMIT 1" 2>/dev/null)
-[[ -n "$SUBHY" && -n "$SUBWARP" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBWARP}\""
+# WARP-узел шлюзу отдаём, только если WARP включён (шаг 6). Иначе строку для него кладём на сервер:
+# её покажет warp-on, если WARP понадобится позже.
+if [[ -n "$SUBHY" && -n "$SUBWARP" ]]; then
+	WARP_GW="sudo add-vps ${SERVER_NAME} --warp \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBWARP}\""
+	echo "$WARP_GW" > /root/warp-gateway-line.txt
+	[[ "$WARP_ON" == "1" ]] && GW_CMD="${GW_CMD} \"https://${MAIN_IP}:${SUB_PORT}/clash/${SUBWARP}\""
+fi
+if   [[ "$DO_WARP" != "1" ]]; then WARP_NOTE="не ставился (DO_WARP=0)"
+elif [[ "$WARP_ON" == "1" ]]; then WARP_NOTE="включён — ${WARP_WHY}"
+else WARP_NOTE="установлен, но выключен — ${WARP_WHY}.
+            Понадобится (панель мониторинга сообщит, что Google считает узел российским) —
+            на сервере: warp-on (подскажет строку для шлюза); выключить: warp-off"; fi
 [[ -n "$HOME_TOKEN" ]] && GW_CMD="${GW_CMD} --pipe ${HOME_TOKEN}"
 MON_NOTE=""
 [[ "$MON_OK" == "1" ]] && MON_NOTE=" В панели мониторинга VPS сервер появится сам при следующем замере."
@@ -668,6 +733,7 @@ cat <<SUMMARY | tee -a /root/3xui-credentials.txt
 ${MON_NOTE}
 
  Выход по умолчанию: ${DEFAULT_EXIT}
+ WARP:      ${WARP_NOTE}
  Реквизиты подключений — выше в /root/3xui-credentials.txt
 
  Сертификат продлевается сам (~раз в 3 дня) и перезапускает панель.

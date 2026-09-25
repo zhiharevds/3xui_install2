@@ -6,6 +6,8 @@
 #   sudo add-vps GB-113 https://IP:2096/clash/<id> [https://IP:2096/clash/<id-hysteria> [https://IP:2096/clash/<id-warp>]]
 #   sudo add-vps GB-113 … --pipe <строка>   то же + вход «телефон вне дома → дом» через этот сервер
 #   sudo add-vps GB-113 --pipe <строка>     только вход домой (сервер в шлюзе уже есть)
+#   sudo add-vps GB-113 --warp <ссылка>     только WARP-узел (сервер в шлюзе уже есть; строку печатает
+#                                           warp-on на сервере, когда WARP включили позже — Р-116)
 #   sudo add-vps --remove GB-113
 #   sudo add-vps --reload            (перечитать конфиг, если в прошлый раз помешала игра)
 #
@@ -179,6 +181,7 @@ def main():
     ap.add_argument("hy_url", nargs="?", help="ссылка подписки Hysteria (/clash/...), если есть")
     ap.add_argument("warp_url", nargs="?", help="ссылка подписки запасного входа «через WARP» (/clash/...), если есть")
     ap.add_argument("--pipe", help="строка от установщика: вход «телефон вне дома → дом» через этот сервер")
+    ap.add_argument("--warp", help="ссылка подписки WARP-узла (/clash/...) — добавить его к уже подключённому серверу")
     ap.add_argument("--remove", action="store_true", help="убрать сервер из шлюза")
     ap.add_argument("--reload", action="store_true", help="только перечитать конфиг")
     ap.add_argument("--config", default=CONFIG, help=argparse.SUPPRESS)
@@ -210,9 +213,22 @@ def main():
     elif tok and not a.url:
         new = direct_rule(old, tok["h"], a.name)
         what = f"Вход домой через {a.name}"
+    elif a.warp and not a.url:
+        if "/clash/" not in a.warp:
+            die(f"ссылка {a.warp} не формата mihomo (в ней должно быть /clash/) — возьми ту, что напечатал warp-on")
+        if not has_provider(old, pid):
+            die(f"сервера «{pid}» в шлюзе нет — сначала добавить его строкой, которую напечатал установщик")
+        if has_provider(old, pid + "-hy2-warp"):
+            die(f"WARP-узел сервера «{pid}» в шлюзе уже есть")
+        _, b = providers_section(old)
+        new = old[:b] + provider_block(pid + "-hy2-warp", a.warp, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским") + old[b:]
+        new = edit_use(new, LIST_GROUP, add=[pid + "-hy2-warp"])
+        what = f"WARP-узел сервера {a.name} добавлен в шлюз"
     else:
         if not a.url:
             die("не указана ссылка подписки")
+        if a.warp and not a.warp_url:
+            a.warp_url = a.warp
         for u in (a.url, a.hy_url, a.warp_url):
             if u and "/clash/" not in u:
                 die(f"ссылка {u} не формата mihomo (в ней должно быть /clash/) — возьми ту, что напечатал установщик")
