@@ -111,7 +111,10 @@ ok "IP=${MAIN_IP}  имя=${SERVER_NAME}  порт панели=${PANEL_PORT}  �
 step "Обновление системы и зависимости"
 systemctl stop unattended-upgrades 2>/dev/null
 systemctl disable unattended-upgrades 2>/dev/null
-while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo "  ждём apt..."; sleep 3; done
+if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+	echo "  система ещё ставит свои обновления — ждём (на свежей ОС бывает до 10 минут)…"
+	while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 3; done
+fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 [[ "$DO_UPGRADE" == "1" ]] && apt-get -y -qq upgrade >/dev/null 2>&1 && ok "система обновлена"
@@ -436,6 +439,9 @@ warp-cli --accept-tos connect    >/dev/null 2>&1
 OK=0
 for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && { OK=1; break; }; sleep 2; done
 [[ "$OK" == "1" ]] || { echo "✗ WARP не подключился — проверить: warp-cli status"; exit 1; }
+# сразу после подключения страна выхода ещё не меряется («?/?») — дать WARP до полуминуты
+# (HIP-USA 2026-09-25: дважды «не узнать» при установке, через минуту — US/US)
+for _ in 1 2 3 4 5 6; do [[ "$(warp-region-fix --show)" != "?/?" ]] && break; sleep 5; done
 for _ in 1 2 3 4 5; do          # сразу несколько попыток, чтобы не ждать сторожа
 	[[ "$(warp-region-fix --show)" != *RU* ]] && break
 	warp-region-fix

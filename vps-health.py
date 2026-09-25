@@ -101,9 +101,19 @@ try:
     # наблюдатель помнит замеры и удалённых выходов (до перезапуска) — берём только живые теги
     live = set(re.findall(r'"tag":\s*"([^"]+)"', sh(
         'for f in /usr/local/x-ui/bin/xray-linux-*; do [ -x "$f" ] && "$f" api lso --server=127.0.0.1:62789 && break; done')))
+    # обратный туннель домой (reverse у клиента входа, Р-66) — не выход каскада: наблюдатель ненадолго
+    # цепляет его, пока мост переподключается, и выходила ложная тревога «r-home не отвечает» (2026-09-25)
+    rev = {"r-home"}
+    try:
+        for ib in json.load(open("/usr/local/x-ui/bin/config.json")).get("inbounds", []):
+            for cl in (ib.get("settings") or {}).get("clients") or []:
+                if (cl.get("reverse") or {}).get("tag"):
+                    rev.add(cl["reverse"]["tag"])
+    except Exception:
+        pass
     if ob:
         r["exits"] = {k: {"alive": bool(v.get("alive")), "delay": v.get("delay")}
-                      for k, v in ob.items() if not live or k in live}
+                      for k, v in ob.items() if (not live or k in live) and k not in rev}
 except Exception:
     pass
 
