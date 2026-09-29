@@ -10,7 +10,7 @@
 #   автопродление с перезапуском панели, fail2ban.
 # Что дописываем мы (в официальных средствах этого нет):
 #   свап, отключение IPv6 и пинга, файрвол, шаблон маршрутизации, подписка по TLS,
-#   WARP (включаем, только если Google видит адрес российским), подключения REALITY/XHTTP с «мин. версией клиента» 0.0.0,
+#   WARP (включаем, только если Google видит адрес российским), подключение XHTTP (REALITY) с «мин. версией клиента» 0.0.0,
 #   подключение Hysteria 2 (2026-09-17: из дома стабильно быстро работает именно оно),
 #   подключение сервера к домашней панели мониторинга VPS,
 #   вход «телефон вне дома → домашний шлюз» (обратный туннель, входы HOME-* в панели; home-pipe.py).
@@ -30,8 +30,9 @@ bad()  { echo -e "  ${red}✗${plain} $*"; }
 # НАСТРОЙКИ — можно переопределить переменными окружения перед запуском
 ###############################################################################
 SUB_PORT=${SUB_PORT:-2096}            # порт подписок
-PORT_REALITY=${PORT_REALITY:-8443}    # подключение REALITY (tcp+vision). НЕ 443: его держим свободным под
-                                      #   синхронизацию папок — 443 пускает почти любой прокси (Р-121)
+# Простого REALITY-TCP (vision) больше нет (Р-126): провайдеры в России глушат его после ~5 соединений
+# подряд — и мобильные (Р-66), и домашний. Остались XHTTP и Hysteria. 443 не занимаем — он под
+# синхронизацию папок (Р-121).
 PORT_XHTTP=${PORT_XHTTP:-8080}        # подключение XHTTP  (его ТСПУ не душит)
 PORT_HY2=${PORT_HY2:-34443}           # подключение Hysteria 2 (UDP)
 DO_HY2=${DO_HY2:-1}                   # 1 = создать подключение Hysteria 2
@@ -166,12 +167,12 @@ fi
 ###############################################################################
 step "Файрвол"
 ufw --force reset >/dev/null 2>&1
-for p in 22/tcp 80/tcp ${PANEL_PORT}/tcp ${SUB_PORT}/tcp ${PORT_REALITY}/tcp ${PORT_XHTTP}/tcp; do
+for p in 22/tcp 80/tcp ${PANEL_PORT}/tcp ${SUB_PORT}/tcp ${PORT_XHTTP}/tcp; do
 	ufw allow $p >/dev/null 2>&1
 done
 [[ "$DO_HY2" == "1" ]] && ufw allow ${PORT_HY2}/udp >/dev/null 2>&1
 ufw --force enable >/dev/null 2>&1
-ok "открыты: 22 (SSH), 80 (выпуск сертификата), ${PANEL_PORT} (панель), ${SUB_PORT} (подписки), ${PORT_REALITY}, ${PORT_XHTTP}$([[ "$DO_HY2" == "1" ]] && echo ", ${PORT_HY2}/udp (Hysteria)")"
+ok "открыты: 22 (SSH), 80 (выпуск сертификата), ${PANEL_PORT} (панель), ${SUB_PORT} (подписки), ${PORT_XHTTP}$([[ "$DO_HY2" == "1" ]] && echo ", ${PORT_HY2}/udp (Hysteria)")"
 
 # 🔴 ufw держит СВОЙ файл настроек ядра (/etc/ufw/sysctl.conf, прописан в
 # /etc/default/ufw как IPT_SYSCTL) и применяет его при каждом включении,
@@ -488,11 +489,11 @@ x-ui restart >/dev/null 2>&1
 sleep 5
 
 ###############################################################################
-# 7. Подключения REALITY (8443), XHTTP (8080) и Hysteria 2 (34443/udp) через API панели
+# 7. Подключения XHTTP (8080) и Hysteria 2 (34443/udp) через API панели
 ###############################################################################
 if [[ "$CREATE_INBOUNDS" == "1" ]]; then
 	step "Создание подключений"
-	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_REALITY PORT_XHTTP PORT_HY2 DO_HY2 DO_WARP CERT KEY SERVER_NAME
+	export PANEL_PORT PANEL_PATH PANEL_PASS CLIENTS PORT_XHTTP PORT_HY2 DO_HY2 DO_WARP CERT KEY SERVER_NAME
 	python3 <<'PYEOF'
 import json, os, re, secrets, ssl, subprocess, time, urllib.request, urllib.parse, http.cookiejar
 PORT, PATH = os.environ["PANEL_PORT"], os.environ["PANEL_PATH"].rstrip("/")
@@ -546,15 +547,8 @@ def add(remark, port, settings, stream, protocol="vless", sniffing=sniff):
     good = '"success":true' in r
     print("  %s: %s" % (remark, "создано" if good else "ОШИБКА " + r[:120]))
 
-# --- REALITY на 8443 (tcp + vision); 443 не занимаем — он под синхронизацию папок ---
-pv, pb = keypair(); sid = secrets.token_hex(8)
-add(SRV + "-REALITY", os.environ["PORT_REALITY"],
-    json.dumps({"clients": [client(n, "xtls-rprx-vision") for n in names], "decryption": "none"}),
-    json.dumps({"network": "tcp", "security": "reality", "realitySettings": {
-        "show": False, "dest": "max.ru:443", "xver": 0, "serverNames": ["max.ru"],
-        "privateKey": pv, "shortIds": [sid],
-        "minClientVer": "0.0.0",          # иначе Xray 26.7+ не пустит mihomo
-        "settings": {"publicKey": pb, "fingerprint": "chrome", "spiderX": "/"}}}))
+# Простого REALITY-TCP (tcp + vision) нет намеренно (Р-126): провайдеры в России глушат его
+# после ~5 соединений подряд. XHTTP пакует трафик в пару соединений — его не трогают.
 
 # --- XHTTP на 8080 (его ТСПУ не душит, в отличие от голого TCP) ---
 pv2, pb2 = keypair(); sid2 = secrets.token_hex(8)
@@ -567,7 +561,7 @@ add(SRV + "-XHTTP", os.environ["PORT_XHTTP"],
         "security": "reality", "realitySettings": {
             "show": False, "dest": "twitch.tv:443", "xver": 0, "serverNames": ["api.twitch.tv"],
             "privateKey": pv2, "shortIds": [sid2],
-            "minClientVer": "0.0.0",
+            "minClientVer": "0.0.0",          # иначе Xray 26.7+ не пустит mihomo
             # chrome, НЕ firefox: Xray 26.9.8+ (панель 3.8.0) отвергает приветствие без
             # пост-квантового ключа X25519MLKEM768, а отпечаток firefox в mihomo его не умеет —
             # с ним подключение XHTTP на новом ядре не работало (2026-09-16).
@@ -613,8 +607,7 @@ if os.environ.get("DO_HY2") == "1":
         print("  hysteria2: ПРОПУЩЕНО — нет сертификата (Hysteria без него не работает)")
 
 with open("/root/3xui-credentials.txt", "a") as f:
-    f.write(f"\n{SRV}-REALITY  sni=max.ru        pbk={pb}  sid={sid}\n")
-    f.write(f"{SRV}-XHTTP sni=api.twitch.tv path=/helix/polls pbk={pb2} sid={sid2}\n")
+    f.write(f"\n{SRV}-XHTTP sni=api.twitch.tv path=/helix/polls pbk={pb2} sid={sid2}\n")
     for n in names:
         f.write(f"  {n:<10} uuid={people[n]['id']}  subId={people[n]['sub']}\n")
     if hy_sub:
@@ -677,11 +670,11 @@ fi
 step "Самопроверка"
 /usr/local/x-ui/bin/xray-linux-amd64 -test -config /usr/local/x-ui/bin/config.json 2>&1 | tail -1
 journalctl -u x-ui --no-pager 2>/dev/null | grep "Web server running" | tail -1 | sed 's/^/  /'
-for p in "${PANEL_PORT}" "${SUB_PORT}" "${PORT_REALITY}" "${PORT_XHTTP}"; do
+for p in "${PANEL_PORT}" "${SUB_PORT}" "${PORT_XHTTP}"; do
 	ss -tln | grep -q ":${p} " && ok "порт ${p} слушает" || bad "порт ${p} НЕ слушает"
 done
 # 443 держим свободным под синхронизацию папок (Р-121) — если сам не отдал его подключению
-if [[ "$PORT_REALITY" != "443" && "$PORT_XHTTP" != "443" ]]; then
+if [[ "$PORT_XHTTP" != "443" ]]; then
 	ss -tln | grep -q ":443 " && bad "порт 443 занят, а он нужен свободным под синхронизацию папок" || ok "порт 443 свободен (под синхронизацию папок)"
 fi
 if [[ "$DO_HY2" == "1" && "$CREATE_INBOUNDS" == "1" ]]; then
