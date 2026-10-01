@@ -31,14 +31,29 @@ def die(msg):
     sys.exit(1)
 
 
-def provider_block(pid, url, note):
+XHTTP = 'select(.network == "xhttp")'
+HY2 = 'select(.type == "hysteria2")'
+
+
+def provider_block(pid, url, note, sel, node):
+    """node — имя узла по правилу «СЕРВЕР-СПОСОБ[-WARP|-DIRECT]», без имени клиента (Р-132):
+    подписка 3x-ui называет узлы как попало («…-HY2-Keenetic-hy»), а длинные не влезают в панель."""
+    lines = [f'({sel} | .name) = "{node}"']
+    if sel == XHTTP:  # не больше двух соединений к серверу: пачки соединений глушит провайдер (Р-128)
+        lines.append(f'({XHTTP} | .["xhttp-opts"]["reuse-settings"]) = {{"max-connections": "2", '
+                     f'"h-max-request-times": "600-900", "h-max-reusable-secs": "1800-3000"}}')
+    expr = "".join(f"        - '{x}'\n" for x in lines)
     return (f"  # {note}\n"
             f"  {pid}:\n"
             f"    type: http\n"
             f"    url: \"{url}\"\n"
             f"    path: ./providers/{pid}.yaml\n"
             f"    interval: 86400\n"
-            f"    override: {{ udp: true }}\n"
+            f"    override:\n"
+            f"      udp: true\n"
+            f"      override-expr:\n{expr}"
+            # простой REALITY-TCP домашний провайдер глушит (Р-126); у старых установок он ещё есть
+            f"    exclude-filter: \"-REALITY-\"\n"
             f"    health-check: {{ enable: true, url: https://www.gstatic.com/generate_204, interval: 300 }}\n\n")
 
 
@@ -196,6 +211,8 @@ def main():
     if not a.name:
         die("не указано имя сервера")
     pid = re.sub(r"[^a-z0-9-]+", "-", a.name.lower()).strip("-")
+    global NODE
+    NODE = pid.upper()   # начало имён узлов: HIP-NL → HIP-NL-XHTTP, HIP-NL-HY2 (Р-132)
     if not pid:
         die("пустое имя")
     pids = [pid, pid + "-hy2", pid + "-hy2-warp"]
@@ -221,7 +238,8 @@ def main():
         if has_provider(old, pid + "-hy2-warp"):
             die(f"WARP-узел сервера «{pid}» в шлюзе уже есть")
         _, b = providers_section(old)
-        new = old[:b] + provider_block(pid + "-hy2-warp", a.warp, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским") + old[b:]
+        new = old[:b] + provider_block(pid + "-hy2-warp", a.warp, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским",
+                                       HY2, f"{NODE}-HY2-WARP") + old[b:]
         new = edit_use(new, LIST_GROUP, add=[pid + "-hy2-warp"])
         what = f"WARP-узел сервера {a.name} добавлен в шлюз"
     else:
@@ -234,13 +252,15 @@ def main():
                 die(f"ссылка {u} не формата mihomo (в ней должно быть /clash/) — возьми ту, что напечатал установщик")
         if has_provider(old, pid):
             die(f"сервер «{pid}» уже есть в конфиге (убрать: sudo add-vps --remove {a.name})")
-        blocks = provider_block(pid, a.url, f"{a.name}: добавлен командой add-vps; подписка формата mihomo — поправки не нужны")
+        blocks = provider_block(pid, a.url, f"{a.name}: XHTTP, добавлен командой add-vps", XHTTP, f"{NODE}-XHTTP")
         added = [pid]
         if a.hy_url:
-            blocks += provider_block(pid + "-hy2", a.hy_url, f"{a.name}: Hysteria 2 (отдельная подписка — панель мониторинга меряет один узел на подписку)")
+            blocks += provider_block(pid + "-hy2", a.hy_url, f"{a.name}: Hysteria 2 (отдельная подписка — панель мониторинга меряет один узел на подписку)",
+                                     HY2, f"{NODE}-HY2")
             added.append(pid + "-hy2")
         if a.warp_url:
-            blocks += provider_block(pid + "-hy2-warp", a.warp_url, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским")
+            blocks += provider_block(pid + "-hy2-warp", a.warp_url, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским",
+                                     HY2, f"{NODE}-HY2-WARP")
             added.append(pid + "-hy2-warp")
         _, b = providers_section(old)
         new = old[:b] + blocks + old[b:]
