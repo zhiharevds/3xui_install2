@@ -11,8 +11,8 @@
 #   sudo add-vps --remove GB-113
 #   sudo add-vps --reload            (перечитать конфиг, если в прошлый раз помешала игра)
 #
-# Что делает: дописывает подписку(и) в proxy-providers, добавляет сервер в список тумблера VPN
-# (только в СПИСОК — трафик на него не пойдёт, пока сам не выберешь его в панели), проверяет
+# Что делает: дописывает подписку(и) в proxy-providers (в тумблеры сервер НЕ попадает: в VPN только
+# автогруппы и DIRECT, Р-161 — трафик на него пойдёт, когда его впишут в автогруппу), проверяет
 # конфиг (mihomo -t), сохраняет в git и перечитывает. Если проверка не прошла — возвращает как было.
 # Конфиг правится как текст, комментарии не трогаются.
 import argparse, base64, json, os, re, subprocess, sys, urllib.request
@@ -20,7 +20,6 @@ import argparse, base64, json, os, re, subprocess, sys, urllib.request
 HOME = "/etc/mihomo"
 CONFIG = HOME + "/config.yaml"
 API = "http://127.0.0.1:9090"
-LIST_GROUP = "VPN"  # тумблер со списком «любой сервер поштучно»
 PIPE_DIR = "/opt/home-pipe"                      # служба home-pipe: обратный туннель шлюз → VPS (Р-66)
 PIPE_CFG = PIPE_DIR + "/config.json"
 PHONES = HOME + "/phones/secrets.json"           # ключи людей и список входов (ведёт команда phones)
@@ -68,23 +67,6 @@ def providers_section(s):
 def has_provider(s, pid):
     a, b = providers_section(s)
     return re.search(rf"^  {re.escape(pid)}:\s*$", s[a:b], re.M) is not None
-
-
-def edit_use(s, group, add=(), remove=()):
-    """Правит строку `use: [...]` внутри группы с именем group. Возвращает новый текст."""
-    m = re.search(rf"^  - name: \"?{re.escape(group)}\"?\s*$", s, re.M)
-    if not m:
-        die(f"не нашёл тумблер «{group}»")
-    nxt = re.search(r"^  - name: ", s[m.end():], re.M)
-    end = m.end() + (nxt.start() if nxt else len(s) - m.end())
-    body = s[m.end():end]
-    u = re.search(r"^(    use: \[)([^\]]*)(\].*)$", body, re.M)
-    if not u:
-        die(f"у тумблера «{group}» нет строки use: [...]")
-    items = [x.strip() for x in u.group(2).split(",") if x.strip()]
-    items = [x for x in items if x not in remove] + [x for x in add if x not in items]
-    body = body[:u.start()] + u.group(1) + ", ".join(items) + u.group(3) + body[u.end():]
-    return s[:m.end()] + body + s[end:]
 
 
 def remove_everywhere(s, pids):
@@ -240,7 +222,6 @@ def main():
         _, b = providers_section(old)
         new = old[:b] + provider_block(pid + "-hy2-warp", a.warp, f"{a.name}: Hysteria 2, выход через Cloudflare WARP — запасной на случай, если адрес сервера Google считает российским",
                                        HY2, f"{NODE}-HY2-WARP") + old[b:]
-        new = edit_use(new, LIST_GROUP, add=[pid + "-hy2-warp"])
         what = f"WARP-узел сервера {a.name} добавлен в шлюз"
     else:
         if not a.url:
@@ -264,7 +245,6 @@ def main():
             added.append(pid + "-hy2-warp")
         _, b = providers_section(old)
         new = old[:b] + blocks + old[b:]
-        new = edit_use(new, LIST_GROUP, add=added)
         if tok:
             new = direct_rule(new, tok["h"], a.name)
         what = f"Сервер {a.name} добавлен в шлюз"
@@ -295,8 +275,8 @@ def main():
     if new == old:
         return
     if reload_config(a) and not a.remove and a.url:
-        print(f"Готово. В панели узлов сервер появится в списке тумблера «{LIST_GROUP}»; трафик на него пойдёт,")
-        print("только когда выберешь его сам. В панели мониторинга VPS он покажется при следующем замере.")
+        print("Готово. Сервер есть в подписках шлюза (zashboard → «Провайдер прокси»); трафик на него пойдёт,")
+        print("только когда его впишут в автогруппу (Р-161). В панели мониторинга VPS он покажется при следующем замере.")
 
 
 if __name__ == "__main__":
