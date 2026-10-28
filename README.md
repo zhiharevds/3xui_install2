@@ -135,6 +135,13 @@ sudo curl -fsSL https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/
 ChatGPT: клиенты `HIP-NL-hy` на ISH-UK и `Keenetic-hy-uk` на HIP-NL, исходящий `ish-uk-hy2`). Обе части — Hysteria.
 Выход каскада ставится установщиком как обычный сервер, но с `DO_HOME=0`: вход домой через него из России не дойдёт.
 
+Если Hysteria на участке вход→выход режут (так с Москвы до Лондона), второй участок делается по XHTTP:
+на выходе — клиент vless во входе XHTTP, на входе — исходящий `vless` с `network: xhttp`, REALITY
+(SNI, `publicKey`, `shortId` — из подписки выхода `/clash/`) и отпечатком `chrome` (Xray 26.9.8+ на выходе
+без него не пустит). Так работает `FORNEX-RU → ISH-UK`: узел шлюза `FORNEX-RU-HY2-UK`, исходящий
+`ish-uk-xhttp`. Проверить участок до настройки — временным Xray на входе (`xray run -c` с socks на
+127.0.0.1 и этим исходящим, через `timeout`), скачать через него 50 МБ несколько раз.
+
 Проверить, режут ли сервер из дома: на шлюзе скачать с панели сервера файл больше 16 КБ, например
 `curl -sk -o /dev/null -w "%{size_download}\n" https://IP:ПОРТ/ПУТЬ/assets/<любой .js со страницы входа>`.
 Обрыв на ~20 КБ — режут, нужен каскад.
