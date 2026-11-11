@@ -397,11 +397,12 @@ if [[ "$DO_WARP" == "1" ]]; then
 	warp-cli --accept-tos mode proxy      >/dev/null 2>&1
 	# Сторож страны WARP. Cloudflare выдаёт выходной адрес случайно, и часть таких адресов Google
 	# считает российскими (на HIP-NL 2026-09-18 — с первой же регистрации). Раз в 10 минут меряет
-	# страну и, пока она RU, перерегистрирует WARP — сколько бы раз ни пришлось. Пока WARP выключен —
-	# молчит. Он же умеет померить сам адрес сервера (--direct): по этому замеру решаем, нужен ли WARP.
+	# страну и, пока она BY, CN, CU, IR, KP, RU или SY, перерегистрирует WARP — сколько бы раз ни пришлось.
+	# Это страны без обычного Gemini web app (D-02). Пока WARP выключен — сторож молчит.
+	# Он же умеет померить сам адрес сервера (--direct): по этому замеру решаем, нужен ли WARP.
 	cat > /usr/local/bin/warp-region-fix <<'WRF'
 #!/bin/bash
-# Сторож страны WARP: пока Google ИЛИ YouTube считает выход WARP российским — перерегистрировать WARP.
+# Сторож страны WARP: Gemini недоступен хотя бы по одному ответу — перерегистрировать WARP.
 # Базы у них разные: на HIP-NL 2026-09-24 аккаунт видел NL, а YouTube — RU; поэтому смотрим обе.
 # Запуск: cron раз в 10 минут (/etc/cron.d/warp-region-fix). Журнал: /var/log/warp-region.log
 # Руками: warp-region-fix (одна проверка), --show (страна выхода WARP «аккаунт/YouTube», напр. NL/RU),
@@ -409,7 +410,7 @@ if [[ "$DO_WARP" == "1" ]]; then
 exec 9>/run/warp-region-fix.lock; flock -n 9 || exit 0
 UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 PX=(-x socks5h://127.0.0.1:40000)
-[[ "$1" == "--direct" ]] && PX=()
+[[ "$1" == "--direct" || "$1" == "--direct-bad" ]] && PX=()
 acc() {
 	curl -s --max-time 12 "${PX[@]}" -A "$UA" \
 		'https://accounts.google.com/v3/signin/identifier?flowName=GlifSetupAndroid' \
@@ -420,14 +421,23 @@ yt() {  # регион YouTube из sw.js_data (в начале защитная
 		| python3 -c 'import sys,json,re;r=sys.stdin.read();v=json.loads(r[r.index("["):])[0][2][0][0][1];print(v if re.fullmatch("[A-Z]{2}",v) else "")' 2>/dev/null
 }
 region() { local a y; a=$(acc); y=$(yt); echo "${a:-?}/${y:-?}"; }
+bad_region() {  # официальный список Gemini: BY, CN (только Workspace), CU, IR, KP, RU, SY
+	local code
+	for code in ${1//\// }; do
+		case "$code" in BY|CN|CU|IR|KP|RU|SY) return 0;; esac
+	done
+	return 1
+}
 [[ "$1" == "--direct" ]] && { region; exit 0; }
+[[ "$1" == "--direct-bad" ]] && { bad_region "$(region)"; exit; }
 if ! systemctl is-active -q warp-svc; then
 	[[ "$1" == "--show" ]] && echo "WARP выключен"
 	exit 0
 fi
 R=$(region)
 [[ "$1" == "--show" ]] && { echo "$R"; exit 0; }
-[[ "$R" != *RU* ]] && exit 0          # нигде не Россия или не удалось узнать — не трогаем
+[[ "$1" == "--bad" ]] && { bad_region "$R"; exit; }
+bad_region "$R" || exit 0               # обе страны подходят для Gemini или не удалось узнать — не трогаем
 warp-cli --accept-tos disconnect          >/dev/null 2>&1
 warp-cli --accept-tos registration delete >/dev/null 2>&1
 warp-cli --accept-tos registration new    >/dev/null 2>&1
@@ -436,12 +446,12 @@ warp-cli --accept-tos connect             >/dev/null 2>&1
 for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi connected && break; sleep 2; done
 sleep 2; N=$(region)
 echo "$(date '+%F %T') аккаунт/YouTube было ${R} — перерегистрация, теперь: ${N}" >> /var/log/warp-region.log
-[[ "$N" != *RU* ]]
+! bad_region "$N"
 WRF
 	cat > /usr/local/bin/warp-on <<'WON'
 #!/bin/bash
 # warp-on — включить Cloudflare WARP на этом сервере: через него выходит вход Keenetic-hy-warp.
-# Нужен, когда Google считает адрес сервера российским (панель мониторинга VPS об этом сообщит).
+# Нужен, когда Gemini недоступен в стране адреса сервера (панель мониторинга VPS об этом сообщит).
 # Выключить обратно: warp-off.
 systemctl enable --now warp-svc >/dev/null 2>&1
 for _ in $(seq 1 15); do warp-cli --accept-tos status >/dev/null 2>&1 && break; sleep 1; done
@@ -454,11 +464,11 @@ for _ in $(seq 1 20); do warp-cli --accept-tos status 2>/dev/null | grep -qi con
 # (HIP-USA 2026-09-25: дважды «не узнать» при установке, через минуту — US/US)
 for _ in 1 2 3 4 5 6; do [[ "$(warp-region-fix --show)" != "?/?" ]] && break; sleep 5; done
 for _ in 1 2 3 4 5; do          # сразу несколько попыток, чтобы не ждать сторожа
-	[[ "$(warp-region-fix --show)" != *RU* ]] && break
+	warp-region-fix --bad || break
 	warp-region-fix
 done
 R=$(warp-region-fix --show)
-if   [[ "$R" == *RU* ]];  then echo "✓ WARP включён, но Google пока считает его выход российским (${R}) — сторож warp-region-fix будет перерегистрировать раз в 10 минут (журнал: /var/log/warp-region.log)"
+if   warp-region-fix --bad; then echo "✓ WARP включён, но Gemini недоступен в стране выхода (${R}) — сторож warp-region-fix будет перерегистрировать раз в 10 минут (журнал: /var/log/warp-region.log)"
 elif [[ "$R" == "?/?" ]]; then echo "✓ WARP включён; страну выхода узнать не удалось — сторож warp-region-fix проверит сам"
 else                          echo "✓ WARP включён; для Google его выход — ${R}"; fi
 if [[ -s /root/warp-gateway-line.txt && "$1" != "--quiet" ]]; then
@@ -481,7 +491,7 @@ WOF
 	DREG=$(warp-region-fix --direct)   # как Google и YouTube видят сам адрес сервера: «аккаунт/YouTube»
 	if   [[ "$DEFAULT_EXIT" == "warp" ]]; then WARP_ON=1; WARP_WHY="весь выход сервера идёт через WARP (DEFAULT_EXIT=warp)"
 	elif [[ "$HOST_CC" == "RU" ]];       then WARP_WHY="сервер в России — выход WARP был бы тоже российским"
-	elif [[ "$DREG" == *RU* ]];          then WARP_ON=1; WARP_WHY="Google/YouTube считают адрес сервера российским (${DREG})"
+	elif warp-region-fix --direct-bad;      then WARP_ON=1; WARP_WHY="Gemini недоступен в стране адреса сервера (${DREG})"
 	elif [[ "$DREG" == "?/?" ]];         then WARP_WHY="как Google видит адрес сервера, узнать не удалось — страну узла покажет панель мониторинга"
 	else                                      WARP_WHY="Google/YouTube и так видят страну сервера (${DREG})"; fi
 	if [[ "$WARP_ON" == "1" ]]; then
