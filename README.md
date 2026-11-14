@@ -135,6 +135,33 @@ WARP-узел (третья ссылка) в строке есть, только
 sudo curl -fsSL https://raw.githubusercontent.com/zhiharevds/3xui_install2/main/add-vps.py -o /usr/local/bin/add-vps && sudo chmod 755 /usr/local/bin/add-vps
 ```
 
+### Точечный вывод нестабильной статики через VPN
+
+Если основная страница открывается напрямую, а её скрипты, стили или картинки зависают, сначала сравни загрузки
+одного файла напрямую и через тестовый прокси. Если прямой маршрут даёт таймауты, а VPN стабильно скачивает файл,
+добавь домен статики в слой 2 точечных исключений `/etc/mihomo/config.yaml`, выше `RULE-SET,geosite-ru`:
+
+```yaml
+- DOMAIN-SUFFIX,static.example.ru,⚡️ VPS основной
+```
+
+Основной домен сайта в правило не включай: страницы и действия пользователя останутся напрямую. Например, для ЮMoney
+через VPN идёт только `static.yoomoney.ru`, а `yoomoney.ru` остаётся в группе «Россия».
+
+После правки:
+
+```bash
+sudo /usr/local/bin/mihomo -t -d /etc/mihomo
+cd /etc/mihomo && sudo git add config.yaml && sudo git commit -m "Статика example.ru идёт через VPS (Р-NN)"
+sudo add-vps --reload
+```
+
+Проверь в журнале, что соединения используют новое правило, и повтори загрузку файлов. Откат:
+
+```bash
+cd /etc/mihomo && sudo git revert <коммит> && sudo add-vps --reload
+```
+
 ## Каскад: выход через второй сервер
 
 Каскад — цепочка «шлюз → сервер-вход → сервер-выход → интернет». Нужен, когда до сервера-выхода
