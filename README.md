@@ -93,6 +93,42 @@ swapon --show | grep -q . || { S=$(( ($(awk '/^MemTotal/{print int($2/1024)}' /p
 echo 'vm.swappiness = 10' > /etc/sysctl.d/60-swap.conf && sysctl -p /etc/sysctl.d/60-swap.conf && free -m
 ```
 
+## Обновление 3x-ui на работающем сервере
+
+Установщик на сервер с уже установленным x-ui не запускается. Панель обновляется заменой
+бинарника: база, входы, клиенты, подписки, порты и путь панели не меняются.
+
+```bash
+# 1. Бэкап: база и старый бинарь
+cp /etc/x-ui/x-ui.db /root/x-ui.db.bak-$(date +%Y%m%d)
+cp /usr/local/x-ui/x-ui /root/x-ui.bin.bak-$(date +%Y%m%d)
+
+# 2. Последняя версия и проверка суммы
+VER=$(curl -s https://api.github.com/repos/MHSanaei/3x-ui/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+curl -Lo /tmp/x-ui.tar.gz "https://github.com/MHSanaei/3x-ui/releases/download/$VER/x-ui-linux-amd64.tar.gz"
+curl -Lo /tmp/x-ui.tar.gz.sha256 "https://github.com/MHSanaei/3x-ui/releases/download/$VER/x-ui-linux-amd64.tar.gz.sha256"
+cd /tmp && sha256sum -c x-ui.tar.gz.sha256 && tar -xzf x-ui.tar.gz x-ui && install -m 755 /tmp/x-ui /usr/local/x-ui/x-ui
+
+# 3. Перезапуск и проверка
+systemctl restart x-ui
+systemctl is-active x-ui && journalctl -u x-ui -n 20 --no-pager | grep -iE 'Xray.*started|error'
+```
+
+После проверь: панель открывается, входы и клиенты на месте, подписка отдаёт ссылки,
+шлюз видит узлы сервера.
+
+Ядро Xray при замене бинарника панели НЕ меняется: оно лежит в `/usr/local/x-ui/bin/`.
+Поднимать ядро выше **26.10.21** нельзя: Xray 26.11.9 требует ML-KEM в REALITY-рукопожатии,
+mihomo такого клиента не пускает — двери шлюза упадут.
+
+Откат — вернуть старый бинарь и базу:
+
+```bash
+install -m 755 /root/x-ui.bin.bak-<дата> /usr/local/x-ui/x-ui
+cp /root/x-ui.db.bak-<дата> /etc/x-ui/x-ui.db
+systemctl restart x-ui
+```
+
 ## Панель мониторинга VPS — `vps-health.py`
 
 Установщик кладёт на сервер `/usr/local/bin/vps-health.py` и прописывает в `authorized_keys`
